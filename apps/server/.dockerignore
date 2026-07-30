@@ -1,0 +1,9 @@
+# The server image builds from ./apps/server, so it needs its own ignore file.
+# Without this, `target/` — several GB after a local build — is uploaded as
+# build context on every deploy.
+
+target
+.env
+.env.*
+keys
+*.log

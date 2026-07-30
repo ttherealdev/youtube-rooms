@@ -1,0 +1,42 @@
+# Keep the build context small and, more importantly, stop `COPY . .` from
+# clobbering dependencies that were installed inside the image.
+
+node_modules
+**/node_modules
+
+# Rust build output — gigabytes, and useless in a Linux image if built on macOS.
+target
+**/target
+
+# Build artefacts; the image rebuilds these itself.
+dist
+**/dist
+.output
+**/.output
+.tanstack
+**/.tanstack
+.nitro
+**/.nitro
+.turbo
+**/.turbo
+
+# Secrets must never enter a layer.
+.env
+.env.*
+!.env.example
+keys
+
+.git
+.github
+.gitignore
+
+# Nothing here affects the build.
+docs
+README.md
+*.md
+.vscode
+.idea
+coverage
+playwright-report
+test-results
+*.log

@@ -184,8 +184,12 @@ impl Config {
             },
 
             auth: AuthConfig {
-                jwt_private_pem: read_pem("JWT_PRIVATE_KEY", "JWT_PRIVATE_KEY_FILE")?,
-                jwt_public_pem: read_pem("JWT_PUBLIC_KEY", "JWT_PUBLIC_KEY_FILE")?,
+                jwt_private_pem: read_pem(
+                    "JWT_PRIVATE_KEY",
+                    "JWT_PRIVATE_KEY_FILE",
+                    "PRIVATE KEY",
+                )?,
+                jwt_public_pem: read_pem("JWT_PUBLIC_KEY", "JWT_PUBLIC_KEY_FILE", "PUBLIC KEY")?,
                 access_token_ttl: secs(parse_opt("ACCESS_TOKEN_TTL_SECS")?.unwrap_or(900)),
                 refresh_token_ttl: secs(
                     parse_opt("REFRESH_TOKEN_TTL_SECS")?.unwrap_or(60 * 60 * 24 * 30),
@@ -332,17 +336,48 @@ where
 
 /// Secrets may arrive inline or as a path — Docker secrets and Dokploy's
 /// env UI disagree about which is idiomatic, so support both.
-fn read_pem(inline_key: &'static str, file_key: &'static str) -> Result<String, ConfigError> {
+fn read_pem(
+    inline_key: &'static str,
+    file_key: &'static str,
+    label: &str,
+) -> Result<String, ConfigError> {
     if let Some(path) = optional(file_key) {
         return std::fs::read_to_string(&path).map_err(|e| ConfigError::Invalid {
             key: file_key,
             reason: format!("could not read `{path}`: {e}"),
         });
     }
-    let inline = required(inline_key)?;
-    // Env vars cannot carry real newlines through every deployment UI, so accept
-    // the common `\n`-escaped form too.
-    Ok(inline.replace("\\n", "\n"))
+    Ok(normalize_pem(&required(inline_key)?, label))
+}
+
+/// Coerce whatever a deployment UI did to the key back into valid PEM.
+///
+/// Three shapes reach us in practice and all three are the same key:
+///   * proper PEM with real newlines
+///   * PEM with `\n` escaped, because the field is single-line
+///   * the bare base64 body, because someone stripped the armour
+///
+/// Rejecting the last two would be technically defensible and practically
+/// hostile — it is a boot failure whose cause is invisible in the UI that
+/// caused it. Anything genuinely malformed still fails later, in the key
+/// parser, which gives a better message than we could.
+fn normalize_pem(raw: &str, label: &str) -> String {
+    let value = raw.trim().replace("\\n", "\n");
+
+    if value.contains("-----BEGIN") {
+        return value;
+    }
+
+    // Bare base64: strip any stray whitespace and re-wrap at 64 columns.
+    let body: String = value.split_whitespace().collect();
+    let wrapped = body
+        .as_bytes()
+        .chunks(64)
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("-----BEGIN {label}-----\n{wrapped}\n-----END {label}-----\n")
 }
 
 const fn secs(v: u64) -> Duration {
@@ -361,6 +396,47 @@ impl From<ParseIntError> for ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_base64_keys_are_wrapped_into_pem() {
+        // Exactly what you get from a deployment UI that stripped the armour.
+        let bare = "MCowBQYDK2VwAyEAnAyqj8aKfgE7IJ9dBH5wAcD1NOOeT3Xgv9hBu2Wrzhw=";
+        let pem = normalize_pem(bare, "PUBLIC KEY");
+
+        assert!(pem.starts_with("-----BEGIN PUBLIC KEY-----\n"));
+        assert!(pem.trim_end().ends_with("-----END PUBLIC KEY-----"));
+        assert!(pem.contains(bare));
+    }
+
+    #[test]
+    fn escaped_newlines_are_restored() {
+        let escaped = "-----BEGIN PRIVATE KEY-----\\nMC4CAQ\\n-----END PRIVATE KEY-----";
+        let pem = normalize_pem(escaped, "PRIVATE KEY");
+
+        assert!(!pem.contains("\\n"));
+        assert_eq!(pem.lines().count(), 3);
+    }
+
+    #[test]
+    fn wellformed_pem_is_left_alone() {
+        let original = "-----BEGIN PRIVATE KEY-----\nMC4CAQ\n-----END PRIVATE KEY-----\n";
+        assert_eq!(normalize_pem(original, "PRIVATE KEY"), original.trim());
+    }
+
+    #[test]
+    fn long_bare_keys_are_wrapped_at_64_columns() {
+        // PEM decoders are line-length tolerant, but emitting canonical output
+        // keeps the failure surface small if a stricter one is ever used.
+        let bare = "A".repeat(200);
+        let pem = normalize_pem(&bare, "PRIVATE KEY");
+
+        let body: Vec<&str> = pem
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
+        assert!(body.iter().all(|line| line.len() <= 64));
+        assert_eq!(body.concat(), bare);
+    }
 
     #[test]
     fn environment_parses_common_spellings() {

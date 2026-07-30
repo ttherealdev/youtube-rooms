@@ -6,29 +6,33 @@
 #   docker build -f apps/web/Dockerfile .
 
 FROM node:26-alpine AS base
-ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
-RUN corepack enable
 
-# --- Dependencies ------------------------------------------------------------
-# Manifests only, so a source-only change does not re-resolve the lockfile.
-FROM base AS deps
-WORKDIR /repo
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/web/package.json apps/web/
-COPY packages/protocol/package.json packages/protocol/
-RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm install --frozen-lockfile
+# Node 26 no longer bundles corepack (`corepack enable` exits 127), so pnpm is
+# installed explicitly and pinned to the same version as the `packageManager`
+# field in package.json. Keep the two in step.
+RUN npm install --global pnpm@11.3.0
+
+ENV PNPM_HOME=/pnpm
+ENV PATH="$PNPM_HOME:$PATH"
 
 # --- Build -------------------------------------------------------------------
 FROM base AS builder
 WORKDIR /repo
-COPY --from=deps /repo/node_modules ./node_modules
-COPY --from=deps /repo/apps/web/node_modules ./apps/web/node_modules
-COPY --from=deps /repo/packages/protocol/node_modules ./packages/protocol/node_modules
+
+# Manifests first, so a source-only change reuses the install layer. Copying
+# node_modules between stages is avoided deliberately: pnpm's store is a tree of
+# relative symlinks and moving it across stages is fragile.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json apps/web/
+COPY packages/protocol/package.json packages/protocol/
+
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm install --frozen-lockfile
+
 COPY . .
 
-# Public config is inlined at build time, so these must be present here rather
-# than only at runtime.
+# Public config is inlined into the bundle at build time, so these must be
+# present here rather than only at runtime.
 ARG PUBLIC_API_URL=""
 ARG PUBLIC_WS_URL=""
 ENV PUBLIC_API_URL=$PUBLIC_API_URL \
@@ -48,6 +52,7 @@ RUN apk add --no-cache tini
 ENV NODE_ENV=production \
     PORT=3000
 
+# The Start server output is self-contained — no node_modules needed at runtime.
 COPY --from=builder --chown=node:node /repo/apps/web/.output ./.output
 
 USER node
