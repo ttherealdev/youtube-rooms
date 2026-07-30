@@ -52,6 +52,12 @@ pub struct Config {
     pub bind_addr: String,
     pub public_url: String,
     pub web_origin: String,
+    /// Read the caller's IP from `CF-Connecting-IP` / `X-Forwarded-For`.
+    ///
+    /// Required behind a reverse proxy, or every user shares one rate-limit
+    /// bucket. Dangerous without one: a directly-reachable origin that believes
+    /// these headers lets any client forge an identity.
+    pub trust_proxy_headers: bool,
 
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
@@ -164,6 +170,7 @@ impl Config {
             bind_addr: optional("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".into()),
             public_url,
             web_origin,
+            trust_proxy_headers: parse_opt("TRUST_PROXY_HEADERS")?.unwrap_or(false),
 
             database: DatabaseConfig {
                 url: required("DATABASE_URL")?,
@@ -241,6 +248,15 @@ impl Config {
                     reason: "must be true in production — session cookies would ride plaintext"
                         .into(),
                 });
+            }
+            if !self.trust_proxy_headers {
+                // Not fatal: someone may genuinely terminate TLS on the
+                // process. But behind a proxy this silently collapses every
+                // per-IP limit into one shared bucket, so it must be loud.
+                tracing::warn!(
+                    "TRUST_PROXY_HEADERS is false in production — if this service sits behind \
+                     a reverse proxy, rate limiting is counting the proxy's IP for every user"
+                );
             }
             if self.web_origin.starts_with("http://") {
                 return Err(ConfigError::Invalid {
@@ -359,6 +375,7 @@ mod tests {
             bind_addr: "0.0.0.0:8080".into(),
             public_url: "http://localhost:8080".into(),
             web_origin: "http://localhost:3000".into(),
+            trust_proxy_headers: false,
             database: DatabaseConfig {
                 url: "postgres://localhost/x".into(),
                 max_connections: 10,

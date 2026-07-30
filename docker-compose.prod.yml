@@ -81,6 +81,10 @@ services:
     environment:
       APP_ENV: production
       BIND_ADDR: 0.0.0.0:8080
+      # Traefik (and Cloudflare in front of it) is the only way in, so the
+      # forwarded headers can be believed. Without this every user shares one
+      # rate-limit bucket, because the TCP peer is always the proxy.
+      TRUST_PROXY_HEADERS: 'true'
       DATABASE_URL: postgres://${POSTGRES_USER:-ytroom}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ytroom}
       REDIS_URL: redis://redis:6379
       PUBLIC_URL: https://${API_DOMAIN:?API_DOMAIN is required}
@@ -107,6 +111,19 @@ services:
       traefik.http.routers.ytroom-api.entrypoints: websecure
       traefik.http.routers.ytroom-api.tls.certresolver: letsencrypt
       traefik.http.services.ytroom-api.loadbalancer.server.port: '8080'
+
+      # `/metrics` reveals room counts, connection counts and node identity.
+      # The app serves it unauthenticated on the assumption that the edge keeps
+      # it internal — so the edge has to. A higher-priority router matches the
+      # path first and an allowlist limited to loopback rejects everyone.
+      # Scrape it from inside the compose network at http://server:8080/metrics.
+      traefik.http.routers.ytroom-metrics.rule: Host(`${API_DOMAIN}`) && PathPrefix(`/metrics`)
+      traefik.http.routers.ytroom-metrics.entrypoints: websecure
+      traefik.http.routers.ytroom-metrics.tls.certresolver: letsencrypt
+      traefik.http.routers.ytroom-metrics.priority: '100'
+      traefik.http.routers.ytroom-metrics.service: ytroom-api
+      traefik.http.routers.ytroom-metrics.middlewares: ytroom-deny-metrics
+      traefik.http.middlewares.ytroom-deny-metrics.ipallowlist.sourcerange: '127.0.0.1/32'
       # Long-lived upgrades must outlive the 15s application heartbeat, or the
       # proxy culls healthy sockets on a timer.
       traefik.http.services.ytroom-api.loadbalancer.responseforwarding.flushinterval: '10ms'
