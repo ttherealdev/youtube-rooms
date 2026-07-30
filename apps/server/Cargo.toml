@@ -1,0 +1,79 @@
+[package]
+name = "youtube-room-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Authoritative realtime service for YouTube Room"
+publish = false
+
+[dependencies]
+# --- HTTP / realtime ---------------------------------------------------------
+axum = { version = "0.8", features = ["ws", "macros", "http2"] }
+axum-extra = { version = "0.12", features = ["cookie", "cookie-private", "typed-header"] }
+tower = { version = "0.5", features = ["timeout", "limit"] }
+tower-http = { version = "0.7", features = [
+  "trace", "cors", "compression-gzip", "compression-br",
+  "request-id", "timeout", "set-header", "catch-panic",
+] }
+http = "1"
+tokio = { version = "1.53", features = ["full"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+
+# --- Data --------------------------------------------------------------------
+sqlx = { version = "0.9", default-features = false, features = [
+  "runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json", "macros", "migrate",
+] }
+redis = { version = "1.5", features = ["tokio-comp", "connection-manager", "script"] }
+
+# --- Serialization -----------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- Auth / crypto -----------------------------------------------------------
+# `rust_crypto` keeps JWT signing off the rustls provider entirely — one less
+# thing that can be ambiguous at process level (see main.rs).
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
+argon2 = "0.5"
+sha2 = "0.11"
+base64 = "0.23"
+rand = "0.9"
+
+# --- Outbound HTTP -----------------------------------------------------------
+# `rustls-no-provider`: reqwest's `rustls` feature would pull aws-lc-rs while
+# sqlx pulls ring, leaving two providers and no process default. We install
+# ring explicitly instead.
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls-no-provider", "webpki-roots", "gzip"] }
+
+# --- Utility -----------------------------------------------------------------
+uuid = { version = "1.24", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+urlencoding = "2"
+time = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+
+[profile.dev]
+opt-level = 0
+incremental = true
+debug = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[lints.clippy]
+# The sync engine does a lot of float arithmetic where the intent is explicit.
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+module_name_repetitions = "allow"

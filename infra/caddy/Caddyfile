@@ -1,0 +1,70 @@
+# Reverse proxy for deployments outside Dokploy.
+#
+# Dokploy supplies its own Traefik ingress and reads the labels in
+# docker-compose.prod.yml, so this file is unused there. It exists because
+# Caddy is the simplest correct way to run this stack anywhere else: automatic
+# TLS with no configuration, and WebSocket upgrades that work by default.
+#
+#   caddy run --config infra/caddy/Caddyfile
+
+{
+	email {$ACME_EMAIL}
+	# Uncomment while testing, to avoid burning Let's Encrypt rate limits:
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# --- Web client ---------------------------------------------------------------
+{$DOMAIN} {
+	encode zstd gzip
+
+	# The app sets its own CSP and security headers; Caddy only adds what a
+	# proxy is responsible for.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	reverse_proxy web:3000 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# --- API and WebSocket ---------------------------------------------------------
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# Sockets are long-lived by design. The read/write timeouts must comfortably
+	# exceed the 15s application heartbeat, or the proxy culls healthy
+	# connections on a timer and every room reconnects in lockstep.
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	reverse_proxy @websocket server:8080 {
+		transport http {
+			read_timeout 3600s
+			write_timeout 3600s
+		}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+
+	# Metrics are operational, not public.
+	@metrics path /metrics
+	respond @metrics 404
+
+	reverse_proxy server:8080 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+
+		health_uri /health/ready
+		health_interval 10s
+		health_timeout 3s
+	}
+}

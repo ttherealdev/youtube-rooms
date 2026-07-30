@@ -1,0 +1,14 @@
+packages:
+  - "apps/web"
+  - "packages/*"
+
+minimumReleaseAgeExclude:
+  - '@tanstack/react-start-rsc@0.1.32'
+  - '@tanstack/react-start@1.168.33'
+  - lucide-react@1.28.0
+
+# Vite/Tailwind/Biome ship native binaries that need their install scripts to run.
+onlyBuiltDependencies:
+  - "@biomejs/biome"
+  - "@tailwindcss/oxide"
+  - esbuild

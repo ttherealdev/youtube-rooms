@@ -1,0 +1,31 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "stream",
+  "globalDependencies": [".env", "tsconfig.base.json"],
+  "globalEnv": ["NODE_ENV"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["src/**", "public/**", "package.json", "tsconfig.json", "vite.config.ts"],
+      "outputs": ["dist/**", ".output/**", ".tanstack/**"],
+      "env": ["PUBLIC_API_URL", "PUBLIC_WS_URL", "PUBLIC_SITE_URL"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "typecheck": {
+      "dependsOn": ["^build"],
+      "inputs": ["src/**", "tsconfig.json"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "inputs": ["src/**", "tests/**"],
+      "outputs": []
+    },
+    "lint": {
+      "outputs": []
+    }
+  }
+}

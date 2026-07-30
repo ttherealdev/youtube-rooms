@@ -1,0 +1,105 @@
+# Development stack.
+#
+# Postgres and Redis publish to the host so `cargo run` and `pnpm dev` can talk
+# to them directly — the usual loop is native processes against containerised
+# infrastructure, which keeps rebuilds fast.
+#
+#   docker compose up -d postgres redis    # just the backing services
+#   docker compose --profile full up       # everything, as it runs in prod
+
+name: youtube-room
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ytroom
+      POSTGRES_PASSWORD: ytroom
+      POSTGRES_DB: ytroom
+      # C collation makes index behaviour match production regardless of the
+      # developer's locale.
+      POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ytroom -d ytroom']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    # No persistence in development: Redis holds only ephemeral state
+    # (presence, leases, rate limits) and losing it is a non-event.
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # A local TURN server, so NAT traversal can be tested without depending on a
+  # hosted relay. Most home networks work without it; symmetric NAT does not.
+  coturn:
+    image: coturn/coturn:latest
+    profiles: ['voice']
+    network_mode: host
+    command:
+      - --listening-port=3478
+      - --realm=localhost
+      - --user=devuser:devpass
+      - --lt-cred-mech
+      - --fingerprint
+      - --no-tls
+      - --no-dtls
+
+  server:
+    profiles: ['full']
+    build:
+      context: ./apps/server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      APP_ENV: development
+      BIND_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://ytroom:ytroom@postgres:5432/ytroom
+      REDIS_URL: redis://redis:6379
+      WEB_ORIGIN: http://localhost:3000
+      PUBLIC_URL: http://localhost:8080
+      COOKIE_SECURE: 'false'
+      JWT_PRIVATE_KEY_FILE: /run/keys/jwt-private.pem
+      JWT_PUBLIC_KEY_FILE: /run/keys/jwt-public.pem
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      RUST_LOG: ${RUST_LOG:-debug,sqlx=info}
+    volumes:
+      - ./keys:/run/keys:ro
+    ports:
+      - '8080:8080'
+
+  web:
+    profiles: ['full']
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        PUBLIC_API_URL: ''
+        PUBLIC_WS_URL: ''
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - '3000:3000'
+
+volumes:
+  postgres-data:

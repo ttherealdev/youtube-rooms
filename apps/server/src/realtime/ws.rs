@@ -1,0 +1,445 @@
+//! WebSocket lifecycle: handshake, pumps, heartbeat, teardown.
+
+use crate::{
+    cache, db,
+    error::AppError,
+    realtime::{
+        protocol::{ChatEntry, ClientMessage, ErrorCode, ReadyPayload, ServerMessage, system_author},
+        room::Room,
+        session::{Session, ice_servers, touch_presence},
+    },
+    rooms::permissions::{self, Role},
+    state::AppState,
+    util,
+};
+use axum::{
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    response::Response,
+};
+use futures_util::{SinkExt, StreamExt};
+use std::sync::{Arc, atomic::Ordering};
+use tokio::sync::mpsc;
+use uuid::Uuid;
+
+pub async fn handler(
+    State(state): State<AppState>,
+    Path(room_id): Path<Uuid>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    // Frames are small; a large limit here would only help an attacker.
+    upgrade
+        .max_message_size(96 * 1024)
+        .max_frame_size(96 * 1024)
+        .on_upgrade(move |socket| run(socket, state, room_id))
+}
+
+async fn run(socket: WebSocket, state: AppState, room_id: Uuid) {
+    state.metrics.ws_connections.fetch_add(1, Ordering::Relaxed);
+
+    if let Err(error) = serve(socket, state.clone(), room_id).await {
+        tracing::debug!(?error, %room_id, "socket closed");
+    }
+
+    state.metrics.ws_connections.fetch_sub(1, Ordering::Relaxed);
+}
+
+async fn serve(socket: WebSocket, state: AppState, room_id: Uuid) -> anyhow::Result<()> {
+    let (mut sink, mut stream) = socket.split();
+
+    // --- Handshake ---------------------------------------------------------
+    // The first frame must be `authenticate`. Anything else, or silence past
+    // the deadline, and the socket closes without ever reaching room state.
+    let handshake = tokio::time::timeout(
+        state.config.realtime.handshake_timeout,
+        await_authentication(&mut stream),
+    )
+    .await;
+
+    let ticket = match handshake {
+        Ok(Ok(ticket)) => ticket,
+        Ok(Err(reason)) => {
+            tracing::debug!(%room_id, reason, "socket handshake rejected");
+            close_with(&mut sink, ErrorCode::Unauthenticated, "Authentication required.").await;
+            return Ok(());
+        }
+        Err(_elapsed) => {
+            tracing::debug!(%room_id, "socket handshake timed out");
+            close_with(&mut sink, ErrorCode::Unauthenticated, "Authentication timed out.").await;
+            return Ok(());
+        }
+    };
+
+    let Some(claims) = redeem_ticket(&state, &ticket, room_id).await else {
+        let _ = sink
+            .send(Message::Text(
+                error_frame(ErrorCode::Unauthenticated, "That session has expired.").into(),
+            ))
+            .await;
+        let _ = sink.close().await;
+        return Ok(());
+    };
+
+    // --- Authorisation -----------------------------------------------------
+    let Some(user) = db::users::find_by_id(&state.db, claims.user_id).await? else {
+        return Ok(());
+    };
+    let summary = db::users::UserSummary::from(&user);
+
+    let room_record = match db::rooms::find_by_id(&state.db, room_id).await? {
+        Some(record) => record,
+        None => {
+            let _ = sink
+                .send(Message::Text(
+                    error_frame(ErrorCode::NotFound, "This room no longer exists.").into(),
+                ))
+                .await;
+            return Ok(());
+        }
+    };
+
+    let membership = db::rooms::find_membership(&state.db, room_id, user.id).await?;
+
+    if membership.as_ref().and_then(|m| m.banned_at).is_some() {
+        let _ = sink
+            .send(Message::Text(
+                serde_json::to_string(&ServerMessage::Kicked {
+                    reason: crate::realtime::protocol::KickReason::Banned,
+                })
+                .unwrap_or_default()
+                .into(),
+            ))
+            .await;
+        return Ok(());
+    }
+
+    let role = membership
+        .as_ref()
+        .map(|m| Role::parse(&m.role))
+        .unwrap_or(if user.kind == "guest" {
+            Role::Guest
+        } else {
+            Role::Member
+        });
+
+    let room = state.hub.get_or_create(room_id).await?;
+
+    // Capacity is checked against live presence, not the membership table —
+    // a room with 200 past members can still admit 25 people at once.
+    if room.participant_count().await >= room_record.max_participants as usize {
+        let _ = sink
+            .send(Message::Text(
+                error_frame(ErrorCode::RoomFull, "This room is full.").into(),
+            ))
+            .await;
+        return Ok(());
+    }
+
+    let permissions = permissions::resolve(role, &room_record.settings.0);
+
+    // --- Pumps -------------------------------------------------------------
+    // Bounded so a client that stops reading cannot grow our memory; a full
+    // queue closes the connection, and reconnect yields a fresh snapshot.
+    let (out_tx, mut out_rx) = mpsc::channel::<Arc<str>>(state.config.realtime.send_buffer);
+    let mut broadcast_rx = room.subscribe();
+
+    let writer_state = state.clone();
+    let heartbeat = state.config.realtime.heartbeat_interval;
+
+    let writer = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(heartbeat);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                // Direct replies to this connection.
+                Some(payload) = out_rx.recv() => {
+                    if sink.send(Message::Text(payload.to_string().into())).await.is_err() {
+                        break;
+                    }
+                    writer_state.metrics.ws_messages_out.fetch_add(1, Ordering::Relaxed);
+                }
+
+                // Room broadcasts.
+                result = broadcast_rx.recv() => {
+                    match result {
+                        Ok(payload) => {
+                            if sink.send(Message::Text(payload.to_string().into())).await.is_err() {
+                                break;
+                            }
+                            writer_state.metrics.ws_messages_out.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            // This client could not keep up. Rather than send a
+                            // partial history, drop it: reconnect delivers a
+                            // complete snapshot (ADR 0004).
+                            tracing::warn!(skipped, "slow client dropped");
+                            writer_state
+                                .metrics
+                                .ws_dropped_slow_clients
+                                .fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+
+                // Protocol-level keepalive. TCP keepalive notices a dead peer
+                // far too late for presence to feel live.
+                _ = ticker.tick() => {
+                    if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let _ = sink.close().await;
+    });
+
+    // --- Join --------------------------------------------------------------
+    let announced = room.attach(summary.clone(), role).await;
+
+    db::rooms::upsert_membership(&state.db, room_id, user.id, role.as_str()).await?;
+
+    let mut session = Session {
+        state: state.clone(),
+        room: Arc::clone(&room),
+        user: summary.clone(),
+        role,
+        permissions,
+        out: out_tx.clone(),
+    };
+
+    session.reply(&build_ready(&state, &room, &session).await?).await;
+
+    if announced {
+        let participant = {
+            let state_guard = room.state.lock().await;
+            state_guard.participants.get(&user.id).map(|p| p.to_protocol())
+        };
+        if let Some(participant) = participant {
+            state
+                .hub
+                .broadcast(&room, &ServerMessage::ParticipantJoined { participant })
+                .await;
+        }
+    }
+
+    {
+        let mut redis = state.redis.clone();
+        touch_presence(&mut redis, room_id, user.id).await;
+    }
+
+    // --- Read loop ---------------------------------------------------------
+    // Liveness is enforced purely by the read timeout below: any frame,
+    // including a transport pong, resets it.
+    let client_timeout = state.config.realtime.client_timeout;
+
+    loop {
+        let next = tokio::time::timeout(client_timeout, stream.next()).await;
+
+        let message = match next {
+            Err(_) => {
+                tracing::debug!(user = %user.id, "client timed out");
+                break;
+            }
+            Ok(None) => break,
+            Ok(Some(Err(error))) => {
+                tracing::debug!(?error, "socket read error");
+                break;
+            }
+            Ok(Some(Ok(message))) => message,
+        };
+
+        match message {
+            Message::Text(text) => {
+                state.metrics.ws_messages_in.fetch_add(1, Ordering::Relaxed);
+
+                match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(parsed) => session.handle(parsed).await,
+                    Err(error) => {
+                        tracing::debug!(?error, "unparseable client message");
+                        session
+                            .reply(&ServerMessage::Error {
+                                code: ErrorCode::InvalidMessage,
+                                message: "Unrecognised message.".into(),
+                                retry_after_ms: None,
+                            })
+                            .await;
+                    }
+                }
+            }
+            Message::Ping(payload) => {
+                // axum answers pings automatically; nothing to do.
+                let _ = payload;
+            }
+            Message::Pong(_) => {}
+            Message::Close(_) => break,
+            Message::Binary(_) => {
+                // The protocol is JSON text only. Binary means a confused or
+                // hostile client.
+                break;
+            }
+        }
+    }
+
+    // --- Teardown ----------------------------------------------------------
+    writer.abort();
+
+    let departed = room.detach(user.id).await;
+    if departed {
+        state
+            .hub
+            .broadcast(&room, &ServerMessage::ParticipantLeft { user_id: user.id })
+            .await;
+        state
+            .hub
+            .broadcast(
+                &room,
+                &ServerMessage::VoicePeerLeft { user_id: user.id },
+            )
+            .await;
+    }
+
+    let remaining = room.participant_count().await as i32;
+    let _ = db::rooms::touch_activity(&state.db, room_id, remaining).await;
+    let _ = db::users::touch_last_seen(&state.db, user.id).await;
+
+    state.hub.release(room_id).await;
+    Ok(())
+}
+
+/// Read frames until the `authenticate` message arrives.
+async fn await_authentication(
+    stream: &mut futures_util::stream::SplitStream<WebSocket>,
+) -> Result<String, &'static str> {
+    while let Some(Ok(message)) = stream.next().await {
+        match message {
+            Message::Text(text) => {
+                return match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(ClientMessage::Authenticate { ticket }) => Ok(ticket),
+                    _ => Err("first frame was not an authentication"),
+                };
+            }
+            Message::Close(_) => return Err("closed during handshake"),
+            // Ignore transport-level frames while waiting.
+            _ => continue,
+        }
+    }
+    Err("stream ended during handshake")
+}
+
+/// Redeem a single-use ticket. `GETDEL` makes redemption atomic, so the same
+/// ticket cannot open two sockets.
+async fn redeem_ticket(
+    state: &AppState,
+    ticket: &str,
+    room_id: Uuid,
+) -> Option<crate::auth::tokens::WsTicket> {
+    let mut redis = state.redis.clone();
+    let key = cache::keys::ws_ticket(&util::sha256_hex(ticket));
+
+    let payload: crate::auth::tokens::WsTicket =
+        cache::take_json(&mut redis, &key).await.ok().flatten()?;
+
+    // A ticket is bound to one room; presenting it elsewhere is rejected.
+    (payload.room_id == room_id).then_some(payload)
+}
+
+async fn build_ready(
+    state: &AppState,
+    room: &Arc<Room>,
+    session: &Session,
+) -> Result<ServerMessage, AppError> {
+    let info = room.info.read().await.clone();
+
+    let timeline = {
+        let mut guard = room.state.lock().await;
+        guard
+            .timeline
+            .get_or_insert_with(|| crate::sync::Timeline::idle(util::now_ms()))
+            .clone()
+    };
+
+    let queue_rows = db::queue::list_pending(&state.db, room.id).await?;
+    let recent = db::chat::recent(&state.db, room.id, 60).await?;
+    let pinned = db::chat::pinned(&state.db, room.id).await?;
+
+    let mut author_ids: Vec<Uuid> = queue_rows.iter().filter_map(|i| i.added_by).collect();
+    author_ids.extend(recent.iter().filter_map(|m| m.author_id));
+    author_ids.extend(pinned.iter().filter_map(|m| m.author_id));
+    author_ids.sort();
+    author_ids.dedup();
+
+    let users = db::users::find_many(&state.db, &author_ids).await?;
+    let lookup: std::collections::HashMap<Uuid, db::users::UserSummary> = users
+        .iter()
+        .map(|u| (u.id, db::users::UserSummary::from(u)))
+        .collect();
+
+    let to_entry = |row: &db::chat::ChatMessage| ChatEntry {
+        id: row.id,
+        author: row
+            .author_id
+            .and_then(|id| lookup.get(&id).cloned())
+            .unwrap_or_else(system_author),
+        body: row.body.clone(),
+        sent_at: row.sent_at.timestamp_millis(),
+        edited_at: row.edited_at.map(|t| t.timestamp_millis()),
+        reply_to: row.reply_to,
+        pinned: row.pinned,
+        nonce: None,
+        mentions: row.mentions.clone(),
+        system: row.system_kind.clone(),
+    };
+
+    Ok(ServerMessage::Ready(Box::new(ReadyPayload {
+        self_user: session.user.clone(),
+        role: session.role.as_str().to_string(),
+        permissions: session.permissions,
+        room: info,
+        timeline,
+        participants: room.snapshot_participants().await,
+        queue: queue_rows
+            .iter()
+            .map(|item| {
+                let author = item
+                    .added_by
+                    .and_then(|id| lookup.get(&id).cloned())
+                    .unwrap_or_else(system_author);
+                crate::realtime::protocol::QueueEntry::from_row(item, author)
+            })
+            .collect(),
+        recent_messages: recent.iter().map(to_entry).collect(),
+        pinned_messages: pinned.iter().map(to_entry).collect(),
+        ice_servers: ice_servers(&state.config.voice),
+        // Seeds the client's offset estimate before its first ping lands.
+        server_time: util::now_ms(),
+    })))
+}
+
+fn error_frame(code: ErrorCode, message: &str) -> String {
+    serde_json::to_string(&ServerMessage::Error {
+        code,
+        message: message.to_string(),
+        retry_after_ms: None,
+    })
+    .unwrap_or_else(|_| r#"{"t":"error","code":"internal","message":"error"}"#.to_string())
+}
+
+/// Tell the client why before hanging up. A bare close leaves the UI unable to
+/// distinguish "your session expired" from "the network died", and the two need
+/// very different handling on the client.
+async fn close_with(
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    code: ErrorCode,
+    message: &str,
+) {
+    let _ = sink
+        .send(Message::Text(error_frame(code, message).into()))
+        .await;
+    let _ = sink.close().await;
+}

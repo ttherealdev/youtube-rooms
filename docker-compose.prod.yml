@@ -1,0 +1,143 @@
+# Production stack, Dokploy-ready.
+#
+# Dokploy runs Traefik as its ingress and reads the labels below, so this file
+# ships no reverse proxy of its own. Deploying anywhere else? Use
+# `infra/caddy/Caddyfile` instead and drop the traefik labels.
+#
+# Required environment (set in Dokploy's UI, or a .env beside this file):
+#   DOMAIN, API_DOMAIN, POSTGRES_PASSWORD, JWT_PRIVATE_KEY, JWT_PUBLIC_KEY
+# See .env.example for the full list.
+
+name: youtube-room
+
+x-logging: &logging
+  driver: json-file
+  options:
+    # Unbounded container logs are the most common way a small VPS runs out of
+    # disk. Cap them here rather than discovering it at 3am.
+    max-size: '10m'
+    max-file: '3'
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: always
+    logging: *logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ytroom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ytroom}
+      POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # No published ports: reachable only on the compose network.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-ytroom}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: '2', memory: 2G }
+
+  redis:
+    image: redis:8-alpine
+    restart: always
+    logging: *logging
+    command:
+      - redis-server
+      - --maxmemory
+      - 512mb
+      # Everything in Redis is reconstructible from Postgres or from a client
+      # reconnect, so evicting the least-recently-used key under pressure is
+      # strictly better than refusing writes.
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ''
+      - --appendonly
+      - 'no'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: '1', memory: 768M }
+
+  server:
+    image: ${SERVER_IMAGE:-youtube-room-server:latest}
+    build:
+      context: ./apps/server
+      dockerfile: Dockerfile
+    restart: always
+    logging: *logging
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      APP_ENV: production
+      BIND_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-ytroom}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ytroom}
+      REDIS_URL: redis://redis:6379
+      PUBLIC_URL: https://${API_DOMAIN:?API_DOMAIN is required}
+      WEB_ORIGIN: https://${DOMAIN:?DOMAIN is required}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+      COOKIE_SECURE: 'true'
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:?JWT_PRIVATE_KEY is required}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?JWT_PUBLIC_KEY is required}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      TURN_URL: ${TURN_URL:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_CREDENTIAL: ${TURN_CREDENTIAL:-}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    # `--scale server=N` works without further configuration because room
+    # ownership is decided by a Redis lease, not by sticky routing (ADR 0010).
+    deploy:
+      resources:
+        limits: { cpus: '2', memory: 1G }
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.ytroom-api.rule: Host(`${API_DOMAIN}`)
+      traefik.http.routers.ytroom-api.entrypoints: websecure
+      traefik.http.routers.ytroom-api.tls.certresolver: letsencrypt
+      traefik.http.services.ytroom-api.loadbalancer.server.port: '8080'
+      # Long-lived upgrades must outlive the 15s application heartbeat, or the
+      # proxy culls healthy sockets on a timer.
+      traefik.http.services.ytroom-api.loadbalancer.responseforwarding.flushinterval: '10ms'
+      traefik.http.services.ytroom-api.loadbalancer.healthcheck.path: /health/ready
+      traefik.http.services.ytroom-api.loadbalancer.healthcheck.interval: '10s'
+      traefik.http.services.ytroom-api.loadbalancer.sticky: 'false'
+
+  web:
+    image: ${WEB_IMAGE:-youtube-room-web:latest}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        PUBLIC_API_URL: https://${API_DOMAIN}
+        PUBLIC_WS_URL: wss://${API_DOMAIN}
+    restart: always
+    logging: *logging
+    depends_on:
+      - server
+    deploy:
+      resources:
+        limits: { cpus: '1', memory: 512M }
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.ytroom-web.rule: Host(`${DOMAIN}`)
+      traefik.http.routers.ytroom-web.entrypoints: websecure
+      traefik.http.routers.ytroom-web.tls.certresolver: letsencrypt
+      traefik.http.services.ytroom-web.loadbalancer.server.port: '3000'
+      traefik.http.services.ytroom-web.loadbalancer.healthcheck.path: /
+      traefik.http.services.ytroom-web.loadbalancer.healthcheck.interval: '15s'
+
+volumes:
+  postgres-data:
+  redis-data:
