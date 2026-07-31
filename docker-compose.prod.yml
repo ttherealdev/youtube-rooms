@@ -137,7 +137,12 @@ services:
       traefik.http.services.ytroom-api.loadbalancer.responseforwarding.flushinterval: '10ms'
       traefik.http.services.ytroom-api.loadbalancer.healthcheck.path: /health/ready
       traefik.http.services.ytroom-api.loadbalancer.healthcheck.interval: '10s'
-      traefik.http.services.ytroom-api.loadbalancer.sticky: 'false'
+      # No sticky label here on purpose. `loadbalancer.sticky` is a struct whose
+      # only member is `cookie`, not a boolean — setting it to 'false' fails to
+      # decode, and Traefik drops *every* label on the container rather than
+      # just that one, which silently unregisters the API router. Round-robin
+      # with no affinity is already the default (ADR 0010 explains why that is
+      # safe here), so asserting it gains nothing.
 
   web:
     image: ${WEB_IMAGE:-youtube-room-web:latest}
