@@ -30,7 +30,9 @@ services:
       POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    # No published ports: reachable only on the compose network.
+    networks: [internal]
+    # No published ports, and not on dokploy-network: reachable only by the
+    # services in this file.
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-ytroom}']
       interval: 10s
@@ -59,6 +61,7 @@ services:
       - 'no'
     volumes:
       - redis-data:/data
+    networks: [internal]
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
@@ -105,8 +108,13 @@ services:
     deploy:
       resources:
         limits: { cpus: '2', memory: 1G }
+    networks: [internal, dokploy-network]
     labels:
       traefik.enable: 'true'
+      # On two networks, Traefik picks a container IP arbitrarily and will
+      # happily choose the one it cannot reach. Naming the network is what makes
+      # the choice deterministic.
+      traefik.docker.network: dokploy-network
       traefik.http.routers.ytroom-api.rule: Host(`${API_DOMAIN}`)
       traefik.http.routers.ytroom-api.entrypoints: websecure
       traefik.http.routers.ytroom-api.tls.certresolver: letsencrypt
@@ -146,8 +154,10 @@ services:
     deploy:
       resources:
         limits: { cpus: '1', memory: 512M }
+    networks: [internal, dokploy-network]
     labels:
       traefik.enable: 'true'
+      traefik.docker.network: dokploy-network
       traefik.http.routers.ytroom-web.rule: Host(`${DOMAIN}`)
       traefik.http.routers.ytroom-web.entrypoints: websecure
       traefik.http.routers.ytroom-web.tls.certresolver: letsencrypt
@@ -158,3 +168,13 @@ services:
 volumes:
   postgres-data:
   redis-data:
+
+networks:
+  # Postgres and Redis live here and nowhere else, so nothing outside this file
+  # can open a connection to them.
+  internal:
+    driver: bridge
+  # Created by Dokploy's installer, shared by every app on the host. Traefik is
+  # on it; that is the only reason it can route to us.
+  dokploy-network:
+    external: true

@@ -19,9 +19,10 @@ ENV PATH="$PNPM_HOME:$PATH"
 FROM base AS builder
 WORKDIR /repo
 
-# Manifests first, so a source-only change reuses the install layer. Copying
-# node_modules between stages is avoided deliberately: pnpm's store is a tree of
-# relative symlinks and moving it across stages is fragile.
+# Manifests first, so a source-only change reuses the install layer. The
+# workspace's own node_modules never leaves this stage — it is a tree of
+# symlinks into /pnpm/store, which is a cache mount and therefore absent from
+# the image. `pnpm deploy` below is what produces a copyable tree.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/
 COPY packages/protocol/package.json packages/protocol/
@@ -41,6 +42,19 @@ ENV PUBLIC_API_URL=$PUBLIC_API_URL \
 
 RUN pnpm --filter @youtube-room/web build
 
+# Vite externalises every dependency from the SSR bundle rather than inlining
+# it, so dist/server/server.js still does `import "react"` at runtime and the
+# image needs a real node_modules. `pnpm deploy` builds one that is
+# self-contained: prod dependencies only, workspace packages copied in rather
+# than symlinked out to /repo, and every remaining link relative and internal —
+# which is what makes the tree survive being copied into the next stage.
+#
+# --legacy is not optional: since pnpm v10, deploying a workspace that does not
+# set `inject-workspace-packages=true` fails without it, and turning that on
+# would change how every package in the repo links during development.
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm --filter @youtube-room/web deploy --prod --legacy /runtime
+
 # --- Runtime -----------------------------------------------------------------
 FROM node:26-alpine AS runtime
 WORKDIR /app
@@ -50,10 +64,19 @@ WORKDIR /app
 RUN apk add --no-cache tini
 
 ENV NODE_ENV=production \
-    PORT=3000
+    PORT=3000 \
+    HOST=0.0.0.0
 
-# The Start server output is self-contained — no node_modules needed at runtime.
-COPY --from=builder --chown=node:node /repo/apps/web/.output ./.output
+# server.js resolves ./dist/server/server.js and ./dist/client relative to
+# itself, so this layout has to match the one it had in the builder.
+#
+# package.json comes along for its `"type": "module"`: module kind is resolved
+# from the nearest package.json, and without one every .js here would be read as
+# CommonJS and the bundle's first `export` would be a syntax error.
+COPY --from=builder --chown=node:node /runtime/package.json ./package.json
+COPY --from=builder --chown=node:node /runtime/node_modules ./node_modules
+COPY --from=builder --chown=node:node /repo/apps/web/dist ./dist
+COPY --from=builder --chown=node:node /repo/apps/web/server.js ./server.js
 
 USER node
 EXPOSE 3000
@@ -66,4 +89,4 @@ LABEL org.opencontainers.image.title="youtube-room-web" \
       org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", ".output/server/index.mjs"]
+CMD ["node", "server.js"]

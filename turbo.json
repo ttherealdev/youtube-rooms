@@ -7,7 +7,7 @@
     "build": {
       "dependsOn": ["^build"],
       "inputs": ["src/**", "public/**", "package.json", "tsconfig.json", "vite.config.ts"],
-      "outputs": ["dist/**", ".output/**", ".tanstack/**"],
+      "outputs": ["dist/**", ".tanstack/**"],
       "env": ["PUBLIC_API_URL", "PUBLIC_WS_URL", "PUBLIC_SITE_URL"]
     },
     "dev": {
