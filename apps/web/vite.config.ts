@@ -23,6 +23,25 @@ export default defineConfig({
     viteReact(),
   ],
 
+  // `src/lib/api.ts` and `src/realtime/socket.ts` read
+  // `import.meta.env.PUBLIC_*`, which Vite only populates for names matching
+  // envPrefix — `VITE_` by default. Without `PUBLIC_` here the Docker build args
+  // are silently dropped, both reads fall back to the current origin, and the
+  // deployed client sends its API and WebSocket traffic to the web host instead
+  // of the API host.
+  envPrefix: ['VITE_', 'PUBLIC_'],
+
+  // Prerendering boots a preview server on an ephemeral port and fetches the
+  // pages over the loopback interface. Left to default, Vite binds the literal
+  // name `localhost`, and inside a Docker build that resolves to ::1 first —
+  // where nothing answers, because the daemon gives containers no working IPv6
+  // loopback. The build then dies on `fetch failed / UND_ERR_CONNECT_TIMEOUT`
+  // after burning the 10s connect timeout. Pinning the address takes name
+  // resolution out of the loop entirely.
+  preview: {
+    host: '127.0.0.1',
+  },
+
   server: {
     port: 3000,
     proxy: {
