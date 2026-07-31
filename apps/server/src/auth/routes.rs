@@ -357,6 +357,12 @@ async fn google_callback(
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("Google sign-in is not configured.".into()))?;
 
+    // Read the incoming state *before* the jar is mutated. `CookieJar::add`
+    // writes into the delta set, and `get` consults the delta ahead of the
+    // request's own cookies — so clearing first makes every later read return
+    // the removal cookie's empty value instead of what the browser sent.
+    let sent_state = jar.get(OAUTH_STATE_COOKIE).map(|c| c.value().to_owned());
+
     let jar = jar.add(cookies::clear_oauth_state_cookie(&state.config.auth));
 
     // The user declined at the consent screen — not an error worth a 500.
@@ -376,9 +382,7 @@ async fn google_callback(
 
     // Both halves must agree. The cookie proves the callback reached the same
     // browser that started the flow; the Redis entry proves we started it.
-    let cookie_state = jar
-        .get(OAUTH_STATE_COOKIE)
-        .map(|c| c.value().to_owned())
+    let cookie_state = sent_state
         .ok_or_else(|| AppError::BadRequest("Sign-in session expired. Please try again.".into()))?;
 
     if cookie_state != returned_state {
