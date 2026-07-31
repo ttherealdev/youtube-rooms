@@ -7,7 +7,7 @@
 Create a room, share one link, and everyone lands on the same frame — with
 voice chat, a shared queue and live chat. No account needed to join.
 
-<br/>
+<br />
 
 ![Status](https://img.shields.io/badge/status-pre--release-f59e0b?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-6366f1?style=flat-square)
