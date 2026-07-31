@@ -1,14 +1,16 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { ArrowLeft, Link2, ListMusic, MessageSquare, Users } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { LoadingIllustration, WaitingRoomIllustration } from '~/components/illustrations';
 import { JoinGate } from '~/components/join-gate';
 import { ChatPanel, ReactionLayer } from '~/components/room/chat';
 import { ParticipantsPanel, QueuePanel } from '~/components/room/panels';
 import { PlayerSurface } from '~/components/room/player';
+import { ShortcutsOverlay } from '~/components/room/shortcuts-overlay';
 import { Button } from '~/components/ui/button';
 import { Badge, EmptyState } from '~/components/ui/field';
+import { type RoomShortcutActions, useRoomShortcuts } from '~/hooks/use-room-shortcuts';
 import { useSession } from '~/hooks/use-session';
 import { api } from '~/lib/api';
 import { cn } from '~/lib/utils';
@@ -93,6 +95,36 @@ function ConnectedRoom({ room }: { room: RoomLookup }) {
 
   const player = usePlayerSync(socket, timeline);
 
+  const [tab, setTab] = useState<PanelId>('chat');
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [mini, setMini] = useState(false);
+
+  /**
+   * Focus is resolved by attribute rather than by threading refs down through
+   * the panel tree. The inputs live three components away and the shortcut is
+   * the only caller.
+   */
+  const focusBy = useCallback((selector: string) => {
+    // After `setTab`, so the field is visible by the time focus lands.
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLInputElement>(selector)?.focus();
+    });
+  }, []);
+
+  const shortcutActions = useMemo<RoomShortcutActions>(
+    () => ({
+      showPanel: setTab,
+      focusChat: () => focusBy('[data-room-chat-input]'),
+      focusSearch: () => focusBy('[data-room-queue-input]'),
+      toggleHelp: () => setHelpOpen((open) => !open),
+      toggleMiniPlayer: () => setMini((value) => !value),
+    }),
+    [focusBy],
+  );
+
+  // Disabled while the help dialog is open so its own Escape/Tab handling wins.
+  useRoomShortcuts({ socket, player, actions: shortcutActions, enabled: !helpOpen });
+
   useEffect(() => {
     const instance = new RoomSocket(room.id);
     socketRef.current = instance;
@@ -139,12 +171,14 @@ function ConnectedRoom({ room }: { room: RoomLookup }) {
 
       <div className="grid min-h-0 flex-1 gap-3 p-3 lg:grid-cols-[1fr_340px]">
         <div className="relative flex min-h-0 flex-col gap-3">
-          <PlayerSurface player={player} socket={socket} />
+          <PlayerSurface player={player} socket={socket} mini={mini} onMiniChange={setMini} />
           <ReactionLayer />
         </div>
 
-        <SidePanel socket={socket} />
+        <SidePanel socket={socket} tab={tab} onTabChange={setTab} />
       </div>
+
+      <ShortcutsOverlay open={helpOpen} onOpenChange={setHelpOpen} />
     </div>
   );
 }
@@ -207,6 +241,9 @@ const TABS = [
   { id: 'people', label: 'People', icon: Users },
 ] as const;
 
+/** Which side panel is showing. Owned by the room so shortcuts can switch it. */
+type PanelId = (typeof TABS)[number]['id'];
+
 /**
  * Tabbed on every size.
  *
@@ -214,9 +251,15 @@ const TABS = [
  * 1280px each column was too narrow to read, and the same component tree now
  * serves mobile without a second implementation.
  */
-function SidePanel({ socket }: { socket: RoomSocket | null }) {
-  const [tab, setTab] = useState<(typeof TABS)[number]['id']>('chat');
-
+function SidePanel({
+  socket,
+  tab,
+  onTabChange,
+}: {
+  socket: RoomSocket | null;
+  tab: PanelId;
+  onTabChange: (tab: PanelId) => void;
+}) {
   return (
     <aside className="flex min-h-0 flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-raised)]">
       <div
@@ -234,7 +277,7 @@ function SidePanel({ socket }: { socket: RoomSocket | null }) {
               aria-selected={active}
               aria-controls={`panel-${item.id}`}
               id={`tab-${item.id}`}
-              onClick={() => setTab(item.id)}
+              onClick={() => onTabChange(item.id)}
               className={cn(
                 'relative flex flex-1 items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors',
                 active

@@ -36,7 +36,6 @@ export interface PlayerSyncHandle {
   setVolume: (value: number) => void;
   getVolume: () => number;
   requestFullscreen: () => void;
-  requestPictureInPicture: () => Promise<void>;
 }
 
 export function usePlayerSync(
@@ -253,31 +252,6 @@ export function usePlayerSync(
     else void host.requestFullscreen?.();
   }, []);
 
-  /**
-   * Picture-in-picture over a cross-origin iframe is not something we can drive
-   * directly — the video element belongs to youtube.com. Document PiP is the
-   * only route, and it is not universal, so this reports failure rather than
-   * pretending.
-   */
-  const requestPictureInPicture = useCallback(async () => {
-    const host = containerElement.current;
-    const documentPip = (
-      window as unknown as {
-        documentPictureInPicture?: {
-          requestWindow(options: { width: number; height: number }): Promise<Window>;
-        };
-      }
-    ).documentPictureInPicture;
-
-    if (!host || !documentPip) {
-      throw new Error('Picture-in-picture is not supported in this browser.');
-    }
-
-    const pipWindow = await documentPip.requestWindow({ width: 480, height: 270 });
-    pipWindow.document.body.style.margin = '0';
-    pipWindow.document.body.append(host);
-  }, []);
-
   return {
     containerRef,
     positionRef,
@@ -289,6 +263,5 @@ export function usePlayerSync(
     setVolume,
     getVolume,
     requestFullscreen,
-    requestPictureInPicture,
   };
 }

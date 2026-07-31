@@ -153,6 +153,8 @@ export function ChatPanel({ socket }: { socket: RoomSocket | null }) {
             aria-label="Message"
             maxLength={2000}
             autoComplete="off"
+            // Target for the `C` shortcut. See `use-room-shortcuts`.
+            data-room-chat-input
           />
           <Button
             type="submit"

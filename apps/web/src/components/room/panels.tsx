@@ -65,6 +65,9 @@ export function QueuePanel({ socket }: { socket: RoomSocket | null }) {
             placeholder="Paste a YouTube link"
             aria-label="Add a video by URL"
             autoComplete="off"
+            // The `/` shortcut finds this by attribute rather than by a ref
+            // threaded down through three components.
+            data-room-queue-input
           />
           <Button
             type="submit"
