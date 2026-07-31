@@ -36,6 +36,10 @@ pub struct Timeline {
     /// Monotonic. Clients discard any timeline not strictly newer than theirs.
     pub version: u64,
     pub queue_item_id: Option<Uuid>,
+    /// `loop` on the wire. Renamed for the same reason as `ReadyPayload::self_user`:
+    /// the protocol name is a Rust keyword, and `rename_all` would otherwise emit
+    /// `loopCurrent`, which the client's schema rejects.
+    #[serde(rename = "loop")]
     pub loop_current: bool,
     /// Duration of the loaded video, when known. Used to clamp seeks and to
     /// decide when the video has ended.

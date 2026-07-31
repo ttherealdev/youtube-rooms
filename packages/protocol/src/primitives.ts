@@ -52,7 +52,14 @@ export const roomCategory = z.enum([
 ]);
 export type RoomCategory = z.infer<typeof roomCategory>;
 
-export const accountKind = z.enum(['google', 'guest']);
+/**
+ * `system` is not a real account. It is the synthetic author the server
+ * attaches to messages with no `author_id` — joins, skips, host changes — and
+ * it therefore appears in `recentMessages` and `pinnedMessages`. Omitting it
+ * makes every snapshot containing a system message fail validation, and the
+ * client discards unparseable frames silently.
+ */
+export const accountKind = z.enum(['google', 'guest', 'system']);
 export type AccountKind = z.infer<typeof accountKind>;
 
 export const permissions = z.object({

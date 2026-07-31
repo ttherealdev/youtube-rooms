@@ -284,6 +284,12 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadyPayload {
+    /// `self` on the wire — the protocol schema names it that, but it is a
+    /// keyword in Rust, so the field is `self_user` and renamed explicitly.
+    /// Without this, `rename_all` emits `selfUser`, the client's schema
+    /// rejects the frame, and `socket.ts` drops it silently: the room sits on
+    /// "Joining…" forever with no error on either side.
+    #[serde(rename = "self")]
     pub self_user: UserSummary,
     pub role: String,
     pub permissions: crate::rooms::permissions::Permissions,
@@ -459,5 +465,72 @@ mod tests {
         };
         let json = serde_json::to_string(&message).unwrap();
         assert!(!json.contains("retryAfterMs"));
+    }
+}
+
+#[cfg(test)]
+mod wire_names {
+    use super::*;
+    use crate::sync::Timeline;
+
+    /// Two fields in this protocol are named after Rust keywords, so the struct
+    /// fields carry different names and rely on `#[serde(rename)]` to restore
+    /// the wire spelling. `rename_all = "camelCase"` silently produces
+    /// `selfUser`/`loopCurrent` if that attribute is ever dropped, and the
+    /// client reacts by discarding the frame in `socket.ts` rather than
+    /// erroring — a room that sits on "Joining…" forever with a clean log on
+    /// both sides. Assert the wire names directly.
+    #[test]
+    fn keyword_fields_keep_their_protocol_names() {
+        let timeline = serde_json::to_value(Timeline::idle(0)).unwrap();
+        assert!(timeline.get("loop").is_some(), "timeline lost `loop`");
+        assert!(
+            timeline.get("loopCurrent").is_none(),
+            "timeline leaked the Rust field name"
+        );
+
+        let ready = ReadyPayload {
+            self_user: system_author(),
+            role: "guest".to_string(),
+            permissions: crate::rooms::permissions::Permissions {
+                can_control_playback: false,
+                can_manage_queue: false,
+                can_invite: false,
+                can_kick: false,
+                can_moderate_chat: false,
+                can_edit_room: false,
+                can_vote_skip: true,
+                can_transfer_host: false,
+            },
+            room: RoomInfo {
+                id: uuid::Uuid::nil(),
+                slug: "slug".to_string(),
+                name: "room".to_string(),
+                topic: None,
+                visibility: "public".to_string(),
+                category: "music".to_string(),
+                host_id: uuid::Uuid::nil(),
+                created_at: 0,
+                max_participants: 25,
+                settings: crate::db::rooms::RoomSettings::default(),
+            },
+            timeline: Timeline::idle(0),
+            participants: Vec::new(),
+            queue: Vec::new(),
+            recent_messages: Vec::new(),
+            pinned_messages: Vec::new(),
+            ice_servers: Vec::new(),
+            server_time: 0,
+        };
+
+        let value = serde_json::to_value(&ready).unwrap();
+        assert!(value.get("self").is_some(), "ready lost `self`");
+        assert!(
+            value.get("selfUser").is_none(),
+            "ready leaked the Rust field name"
+        );
+
+        // Printed so the JSON can be checked against the Zod schema directly.
+        println!("{}", serde_json::to_string(&ready).unwrap());
     }
 }
