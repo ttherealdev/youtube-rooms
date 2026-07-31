@@ -13,6 +13,18 @@ import { apiError } from '@youtube-room/protocol';
 
 const BASE = import.meta.env.PUBLIC_API_URL ?? '';
 
+/**
+ * Absolute URL for an API path.
+ *
+ * `api()` applies the same prefix internally. This is exported for the one flow
+ * that cannot go through `fetch`: the OAuth handoff is a full-page navigation,
+ * and a relative URL there resolves against the *web* origin, which serves no
+ * `/api` routes in production.
+ */
+export function apiUrl(path: string): string {
+  return `${BASE}${path}`;
+}
+
 let accessToken: string | null = null;
 let refreshInFlight: Promise<string | null> | null = null;
 

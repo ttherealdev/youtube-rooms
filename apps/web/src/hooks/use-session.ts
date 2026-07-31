@@ -1,6 +1,6 @@
 import type { UserSummary } from '@youtube-room/protocol';
 import { useCallback, useEffect, useState } from 'react';
-import { api, refreshAccessToken, scheduleRefresh, setAccessToken } from '~/lib/api';
+import { api, apiUrl, refreshAccessToken, scheduleRefresh, setAccessToken } from '~/lib/api';
 
 /**
  * Who is signed in, if anyone.
@@ -62,8 +62,12 @@ export function useSession() {
 
   const signInWithGoogle = useCallback((returnTo: string) => {
     // A full navigation, not fetch: the OAuth flow needs the browser to follow
-    // redirects and set cookies on the way back.
-    window.location.href = `/api/auth/google/start?return_to=${encodeURIComponent(returnTo)}`;
+    // redirects and set cookies on the way back. It must be an absolute API URL
+    // — the web and API run on separate hosts in production, and a relative one
+    // lands on the web server, which has no /api routes.
+    window.location.href = apiUrl(
+      `/api/auth/google/start?return_to=${encodeURIComponent(returnTo)}`,
+    );
   }, []);
 
   const signOut = useCallback(async () => {
