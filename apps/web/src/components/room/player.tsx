@@ -1,428 +1,368 @@
-import { positionAt } from '@youtube-room/protocol';
+'use client';
+
+import { type MediaSource, mayBeLive, positionAt } from '@playercn/protocol';
 import {
-  GripHorizontal,
+  Loader2,
   Maximize,
-  Minimize2,
   Pause,
-  PictureInPicture2,
   Play,
+  Repeat,
+  SkipBack,
   SkipForward,
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
-import { NoVideoIllustration } from '~/components/illustrations';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '~/components/ui/button';
-import { Badge, EmptyState } from '~/components/ui/field';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '~/components/ui/dropdown-menu';
+import { Slider } from '~/components/ui/slider';
 import { cn, formatDuration } from '~/lib/utils';
+import type { PlayerEngine } from '~/realtime/player/engine';
+import { MediaEngine } from '~/realtime/player/media-engine';
+import { YouTubeEngine } from '~/realtime/player/youtube-engine';
 import type { RoomSocket } from '~/realtime/socket';
-import type { PlayerSyncHandle } from '~/realtime/use-player-sync';
-import { usePermissions, useSkipVotes, useTimeline } from '~/stores/room-store';
+import { usePlayerSync } from '~/realtime/use-player-sync';
+import { usePermissions, useTimeline } from '~/stores/room-store';
+
+const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 
 /**
- * Drift, at a scale a person can read. Six decimal places of milliseconds says
- * nothing useful once a player is seconds out of step — and "408203ms" was how
- * a stalled player reported itself.
- */
-function formatDrift(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const seconds = ms / 1000;
-  return seconds < 60 ? `${seconds.toFixed(1)}s` : formatDuration(seconds);
-}
-
-/**
- * The video surface and its controls.
+ * The room's player.
  *
- * The progress bar, time readout and sync badge are all driven from
- * `requestAnimationFrame` writing directly to the DOM. None of these values
- * are React state — putting a 60 Hz number in `useState` here would re-render
- * the chat log sixty times a second (ADR 0008).
+ * One surface over four very different playback mechanisms. The engine is
+ * rebuilt whenever the *source* changes — keyed on the URL, not on the timeline
+ * object, which changes on every pause and seek — and the sync loop is what
+ * keeps it on the room's position.
+ *
+ * Controls here send *intents*. Nothing is applied locally and then reconciled:
+ * the server decides, broadcasts, and the sync loop follows. That is why
+ * pressing pause in a room you cannot control does nothing visible rather than
+ * pausing and then snapping back.
  */
-export function PlayerSurface({
-  player,
-  socket,
-  mini = false,
-  onMiniChange,
-}: {
-  player: PlayerSyncHandle;
-  socket: RoomSocket | null;
-  /**
-   * Float the surface over the page instead of sitting in the layout.
-   *
-   * This is a *style* change and nothing else. The iframe keeps its place in
-   * the document, which is the whole point: relocating it — as the old
-   * Document-PiP path did — reloads the embed into a document with no valid
-   * URL, and YouTube refuses it with error 153.
-   */
-  mini?: boolean;
-  onMiniChange?: (mini: boolean) => void;
-}) {
+export function Player({ socket }: { socket: RoomSocket | null }) {
   const timeline = useTimeline();
   const permissions = usePermissions();
-  const votes = useSkipVotes();
 
-  const progressRef = useRef<HTMLDivElement>(null);
-  const elapsedRef = useRef<HTMLSpanElement>(null);
-  const remainingRef = useRef<HTMLSpanElement>(null);
-  const syncRef = useRef<HTMLSpanElement>(null);
-  const scrubRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const mountRef = useRef<HTMLDivElement>(null);
+  const engineRef = useRef<PlayerEngine | null>(null);
 
+  const [engine, setEngine] = useState<PlayerEngine | null>(null);
+  const [buffering, setBuffering] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
-  /** Offset from the bottom-right corner, in px, while floating. */
-  const [miniOffset, setMiniOffset] = useState({ x: 24, y: 24 });
+  const [volume, setVolume] = useState(1);
+  const [position, setPosition] = useState(0);
 
-  /**
-   * Drag the floating player by its title bar.
-   *
-   * The bar exists precisely because pointer events over a cross-origin iframe
-   * never reach us — dragging by the video itself cannot work.
-   */
-  function startMiniDrag(event: React.PointerEvent<HTMLDivElement>) {
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const origin = miniOffset;
-
-    const onMove = (moveEvent: PointerEvent) => {
-      setMiniOffset({
-        x: Math.max(8, origin.x - (moveEvent.clientX - startX)),
-        y: Math.max(8, origin.y - (moveEvent.clientY - startY)),
-      });
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-
-  // The imperative render loop. One rAF for the whole control bar.
-  useEffect(() => {
-    let frame = 0;
-
-    const tick = () => {
-      const duration = player.durationRef.current;
-      const position = player.positionRef.current;
-
-      if (duration > 0) {
-        const ratio = Math.min(1, Math.max(0, position / duration));
-        if (progressRef.current) {
-          progressRef.current.style.transform = `scaleX(${ratio})`;
-        }
-        if (elapsedRef.current) {
-          elapsedRef.current.textContent = formatDuration(position);
-        }
-        if (remainingRef.current) {
-          remainingRef.current.textContent = `-${formatDuration(duration - position)}`;
-        }
-      }
-
-      if (syncRef.current) {
-        const signed = player.driftRef.current;
-        const drift = Math.abs(signed);
-        const inSync = drift < 150;
-        // `drift` is `observed - target`, so a negative value means this player
-        // is trailing the room and a positive one means it has run ahead.
-        // Reporting the absolute value as "behind" described half of them wrong.
-        syncRef.current.textContent = inSync
-          ? 'in sync'
-          : `${formatDrift(drift)} ${signed < 0 ? 'behind' : 'ahead'}`;
-        syncRef.current.dataset.state = inSync ? 'ok' : 'drifting';
-      }
-
-      frame = requestAnimationFrame(tick);
-    };
-
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [player]);
-
+  const source = timeline?.source ?? null;
+  // The engine's identity is the source, not the timeline: rebuilding on every
+  // pause would reload the video each time anyone touched the controls.
+  const sourceKey = source ? `${source.kind}:${source.url}` : null;
   const canControl = permissions?.canControlPlayback ?? false;
+  const live = source ? mayBeLive(source) : false;
+
+  // Keyed on `sourceKey` on purpose. `source` is a fresh object on every
+  // timeline update, and `canControl` changing must not tear down and reload
+  // the player everyone in the room is watching.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rebuild only on source change
+  useEffect(() => {
+    if (!source || !sourceKey) {
+      engineRef.current?.destroy();
+      engineRef.current = null;
+      setEngine(null);
+      return;
+    }
+
+    setError(null);
+    setBuffering(true);
+
+    const events = {
+      onBufferingChange: setBuffering,
+      onError: (message: string) => {
+        setError(message);
+        setBuffering(false);
+      },
+      onDurationChange: (seconds: number) => {
+        // Only the room's authority learns durations for us; anyone able to
+        // control playback may report, and the server keeps the first.
+        if (canControl) socket?.send({ t: 'report_duration', seconds });
+      },
+    };
+
+    const next: PlayerEngine =
+      source.kind === 'youtube'
+        ? new YouTubeEngine(mountRef.current as HTMLElement, source, events)
+        : new MediaEngine(videoRef.current as HTMLVideoElement, source, events);
+
+    engineRef.current = next;
+    setEngine(next);
+
+    return () => {
+      next.destroy();
+      engineRef.current = null;
+    };
+  }, [sourceKey, socket]);
+
+  usePlayerSync(engine, timeline, socket);
+
+  // Position readout, driven from the timeline rather than the player so the
+  // scrubber shows where the *room* is even while a client is rebuffering.
+  useEffect(() => {
+    if (!timeline || !socket) return;
+    const update = () => setPosition(positionAt(timeline, socket.clock.serverNow()));
+    update();
+    const id = setInterval(update, 250);
+    return () => clearInterval(id);
+  }, [timeline, socket]);
+
+  const send = useCallback(
+    (action: Parameters<RoomSocket['send']>[0] extends never ? never : SyncAction) => {
+      if (!socket || !timeline) return;
+      socket.send({ t: 'sync_intent', action, version: timeline.version });
+    },
+    [socket, timeline],
+  );
+
+  const duration = timeline?.duration ?? null;
   const paused = timeline?.paused ?? true;
-  const hasVideo = Boolean(timeline?.videoId);
 
-  function sendIntent(action: Parameters<RoomSocket['send']>[0]) {
-    socket?.send(action);
-  }
-
-  function scrub(event: React.MouseEvent<HTMLDivElement>) {
-    if (!canControl || !timeline || player.durationRef.current <= 0) return;
-
-    const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = (event.clientX - rect.left) / rect.width;
-    const position = Math.max(0, Math.min(1, ratio)) * player.durationRef.current;
-
-    // An intent, not a local seek: the player moves when the server's echo
-    // arrives, so every participant — including this one — transitions on the
-    // same authoritative record (ADR 0005 §4).
-    sendIntent({
-      t: 'sync_intent',
-      action: { kind: 'seek', position },
-      version: timeline.version,
-    });
-  }
+  if (!source) return <IdlePlayer />;
 
   return (
-    <>
-      {/* Keeps the column from collapsing while the player floats. */}
-      {mini ? (
-        <button
-          type="button"
-          onClick={() => onMiniChange?.(false)}
-          className={cn(
-            'grid aspect-video w-full place-items-center rounded-[var(--radius-xl)]',
-            'border border-dashed border-[var(--border-subtle)] bg-[var(--surface-base)]',
-            'text-xs text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]',
-          )}
-        >
-          Playing in the mini player — click to bring it back
-        </button>
+    <div
+      ref={containerRef}
+      className="group relative isolate aspect-video w-full overflow-hidden rounded-xl border bg-black"
+    >
+      {/* Both mounts always exist so switching source kinds does not depend on
+          a ref that has not been attached yet on the render the engine builds. */}
+      <div
+        ref={mountRef}
+        className={cn('size-full', source.kind !== 'youtube' && 'hidden')}
+        aria-hidden={source.kind !== 'youtube'}
+      />
+      {/* Captions travel inside the media — an HLS manifest carries its own
+          subtitle renditions, and an MP4 its own tracks — so there is no
+          separate <track> for us to author. A room plays arbitrary URLs, and
+          inventing an empty track element would claim captions exist when they
+          do not. */}
+      {/* biome-ignore lint/a11y/useMediaCaption: captions ship inside the source */}
+      <video
+        ref={videoRef}
+        className={cn('size-full bg-black', source.kind === 'youtube' && 'hidden')}
+        playsInline
+        aria-hidden={source.kind === 'youtube'}
+      />
+
+      {buffering && !error ? (
+        <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/30">
+          <Loader2 className="size-8 animate-spin text-white/80" />
+        </div>
       ) : null}
 
-      <div
-        className={cn(
-          'flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-black',
-          mini && 'fixed z-40 w-[min(24rem,calc(100vw-2rem))] shadow-2xl',
-        )}
-        style={mini ? { right: miniOffset.x, bottom: miniOffset.y } : undefined}
-      >
-        {mini ? (
-          <div
-            onPointerDown={startMiniDrag}
-            className={cn(
-              'flex shrink-0 cursor-grab items-center gap-2 border-b border-[var(--border-subtle)]',
-              'bg-[var(--surface-raised)] px-2 py-1.5 active:cursor-grabbing',
-            )}
-          >
-            <GripHorizontal className="size-3.5 text-[var(--text-muted)]" aria-hidden />
-            <span className="truncate text-2xs text-[var(--text-muted)]">Mini player</span>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="ml-auto"
-              aria-label="Return the player to the room"
-              onClick={() => onMiniChange?.(false)}
-            >
-              <Minimize2 />
-            </Button>
+      {error ? (
+        <div className="absolute inset-0 grid place-items-center bg-black/80 p-6 text-center">
+          <div className="max-w-sm space-y-2">
+            <p className="text-sm font-medium text-white">Can’t play this source</p>
+            <p className="text-xs text-white/70">{error}</p>
+            {canControl ? (
+              <Button size="sm" variant="secondary" onClick={() => send({ kind: 'next' })}>
+                Skip to next
+              </Button>
+            ) : null}
           </div>
-        ) : null}
+        </div>
+      ) : null}
 
-        <div className="relative aspect-video w-full">
-          {/* The iframe mounts here; it must never unmount between videos or the
-            player reloads and the room stutters. */}
-          <div ref={player.containerRef} className="absolute inset-0 [&_iframe]:size-full" />
+      {/* A transparent lid over the YouTube iframe. Without it the iframe eats
+          clicks and users control YouTube directly, desynchronising the room. */}
+      <div className="absolute inset-0 bottom-16" aria-hidden />
 
-          {!hasVideo ? (
-            <div className="absolute inset-0 grid place-items-center bg-[var(--surface-base)]">
-              <EmptyState
-                illustration={
-                  <NoVideoIllustration className="size-44 text-[var(--text-primary)]" />
-                }
-                title="Nothing playing yet"
-                description={
-                  permissions?.canManageQueue
-                    ? 'Paste a YouTube link in the queue to get started.'
-                    : 'Waiting for the host to queue something.'
-                }
-              />
-            </div>
-          ) : null}
-
-          {player.error ? (
-            <div className="absolute inset-x-0 bottom-0 bg-danger-500/90 px-4 py-2 text-center text-xs text-white">
-              {player.error}
-            </div>
-          ) : null}
-
-          {player.buffering && hasVideo ? (
-            <div className="absolute right-3 top-3">
-              <Badge tone="neutral">Buffering…</Badge>
-            </div>
-          ) : null}
-
-          {/* A transparent shield over the iframe. Without it, clicks reach
-            YouTube's own controls and one person can desync the room. */}
-          {hasVideo ? (
-            <button
-              type="button"
-              className="absolute inset-0 cursor-default"
-              aria-label={paused ? 'Play' : 'Pause'}
-              onClick={() => {
-                if (!canControl || !timeline) return;
-                sendIntent({
-                  t: 'sync_intent',
-                  action: { kind: paused ? 'play' : 'pause' },
-                  version: timeline.version,
-                });
+      <div className="absolute inset-x-0 bottom-0 space-y-1.5 bg-gradient-to-t from-black/90 to-transparent p-3 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+        <div className="flex items-center gap-2 text-[11px] text-white/70">
+          <span data-numeric>{formatDuration(position)}</span>
+          {live ? (
+            <span className="flex flex-1 items-center gap-1.5">
+              <span className="size-1.5 animate-pulse rounded-full bg-red-500" />
+              <span className="font-medium tracking-wide text-red-400 uppercase">Live</span>
+            </span>
+          ) : (
+            <Slider
+              className="flex-1"
+              value={[Math.min(position, duration ?? position)]}
+              min={0}
+              max={duration ?? Math.max(position, 1)}
+              step={1}
+              disabled={!canControl || duration === null}
+              onValueChange={(value) => {
+                const next = firstThumb(value);
+                if (next != null) send({ kind: 'seek', position: next });
               }}
+              aria-label="Seek"
             />
-          ) : null}
+          )}
+          <span data-numeric>{formatDuration(duration)}</span>
         </div>
 
-        {/* Controls */}
-        <div className="space-y-2 bg-[var(--surface-raised)] px-4 py-3">
-          <div
-            ref={scrubRef}
-            onClick={scrub}
-            onKeyDown={(event) => {
-              if (!canControl || !timeline || !socket) return;
-              const step = event.shiftKey ? 30 : 5;
-              const current = positionAt(timeline, socket.clock.serverNow());
-              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-                event.preventDefault();
-                sendIntent({
-                  t: 'sync_intent',
-                  action: {
-                    kind: 'seek',
-                    position: Math.max(0, current + (event.key === 'ArrowRight' ? step : -step)),
-                  },
-                  version: timeline.version,
-                });
-              }
-            }}
-            role="slider"
-            tabIndex={canControl ? 0 : -1}
-            aria-label="Playback position"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={0}
-            aria-disabled={!canControl}
-            className={cn(
-              'group relative h-4 -my-1 flex items-center',
-              canControl ? 'cursor-pointer' : 'cursor-not-allowed',
-            )}
+        <div className="flex items-center gap-1">
+          <ControlButton
+            label={paused ? 'Play' : 'Pause'}
+            disabled={!canControl}
+            onClick={() => send({ kind: paused ? 'play' : 'pause' })}
           >
-            <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--surface-hover)]">
-              <div
-                ref={progressRef}
-                className="h-full w-full origin-left rounded-full bg-[var(--accent)]"
-                style={{ transform: 'scaleX(0)' }}
-              />
-            </div>
-          </div>
+            {paused ? <Play className="size-4" /> : <Pause className="size-4" />}
+          </ControlButton>
 
-          <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              disabled={!canControl || !hasVideo}
-              aria-label={paused ? 'Play' : 'Pause'}
-              onClick={() => {
-                if (!timeline) return;
-                sendIntent({
-                  t: 'sync_intent',
-                  action: { kind: paused ? 'play' : 'pause' },
-                  version: timeline.version,
-                });
-              }}
-            >
-              {paused ? <Play /> : <Pause />}
-            </Button>
+          <ControlButton
+            label="Previous"
+            disabled={!canControl}
+            onClick={() => send({ kind: 'previous' })}
+          >
+            <SkipBack className="size-4" />
+          </ControlButton>
 
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              disabled={!canControl || !hasVideo}
-              aria-label="Skip to next"
-              onClick={() => {
-                if (!timeline) return;
-                sendIntent({
-                  t: 'sync_intent',
-                  action: { kind: 'next' },
-                  version: timeline.version,
-                });
-              }}
-            >
-              <SkipForward />
-            </Button>
+          <ControlButton label="Next" disabled={!canControl} onClick={() => send({ kind: 'next' })}>
+            <SkipForward className="size-4" />
+          </ControlButton>
 
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={muted ? 'Unmute' : 'Mute'}
+          <ControlButton
+            label={timeline?.loop ? 'Stop looping' : 'Loop'}
+            disabled={!canControl}
+            onClick={() => send({ kind: 'set_loop', loop: !timeline?.loop })}
+            className={timeline?.loop ? 'text-primary' : undefined}
+          >
+            <Repeat className="size-4" />
+          </ControlButton>
+
+          <div className="ml-1 flex items-center gap-1.5">
+            <ControlButton
+              label={muted ? 'Unmute' : 'Mute'}
               onClick={() => {
                 const next = !muted;
                 setMuted(next);
-                player.setVolume(next ? 0 : 100);
+                engine?.setMuted(next);
               }}
             >
-              {muted ? <VolumeX /> : <Volume2 />}
-            </Button>
-
-            <span className="ml-1 font-mono text-2xs text-[var(--text-muted)]" data-numeric>
-              <span ref={elapsedRef}>0:00</span>
-              <span className="mx-1 opacity-40">/</span>
-              <span ref={remainingRef}>-0:00</span>
-            </span>
-
-            <span
-              ref={syncRef}
-              data-state="ok"
-              className={cn(
-                'ml-auto font-mono text-2xs transition-colors',
-                'data-[state=ok]:text-success-500 data-[state=drifting]:text-warning-500',
-              )}
-            >
-              in sync
-            </span>
-
-            {!canControl && hasVideo ? (
-              <VoteSkipButton
-                votes={votes}
-                onVote={(voting) => sendIntent({ t: 'skip_vote', voting })}
-              />
-            ) : null}
-
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={mini ? 'Return the player to the room' : 'Mini player'}
-              onClick={() => onMiniChange?.(!mini)}
-            >
-              {mini ? <Minimize2 /> : <PictureInPicture2 />}
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Fullscreen"
-              onClick={player.requestFullscreen}
-            >
-              <Maximize />
-            </Button>
+              {muted ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
+            </ControlButton>
+            {/* Volume is purely local — it is the one control that must never
+                be shared, or one person's headphones set everyone's level. */}
+            <Slider
+              className="w-20"
+              value={[muted ? 0 : volume]}
+              min={0}
+              max={1}
+              step={0.05}
+              onValueChange={(value) => {
+                const next = firstThumb(value);
+                if (next == null) return;
+                setVolume(next);
+                setMuted(next === 0);
+                engine?.setVolume(next);
+                engine?.setMuted(next === 0);
+              }}
+              aria-label="Volume"
+            />
           </div>
+
+          <span className="flex-1" />
+
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!canControl || live}
+                  className="text-white/80 hover:bg-white/10 hover:text-white"
+                >
+                  {timeline?.rate ?? 1}×
+                </Button>
+              }
+            />
+            <DropdownMenuContent align="end">
+              {RATES.map((rate) => (
+                <DropdownMenuItem key={rate} onClick={() => send({ kind: 'set_rate', rate })}>
+                  {rate}×
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          <ControlButton
+            label="Fullscreen"
+            onClick={() => {
+              const node = containerRef.current;
+              if (!node) return;
+              if (document.fullscreenElement) void document.exitFullscreen();
+              else void node.requestFullscreen();
+            }}
+          >
+            <Maximize className="size-4" />
+          </ControlButton>
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
-function VoteSkipButton({
-  votes,
-  onVote,
-}: {
-  votes: { votes: number; needed: number; voters: string[] };
-  onVote: (voting: boolean) => void;
-}) {
-  const [voted, setVoted] = useState(false);
+type SyncAction =
+  | { kind: 'play' }
+  | { kind: 'pause' }
+  | { kind: 'seek'; position: number }
+  | { kind: 'set_rate'; rate: number }
+  | { kind: 'set_loop'; loop: boolean }
+  | { kind: 'play_now'; queueItemId: string }
+  | { kind: 'next' }
+  | { kind: 'previous' }
+  | { kind: 'restart' };
 
+/**
+ * Normalise a slider value.
+ *
+ * The primitive supports multi-thumb ranges and so reports either a number or
+ * an array of them. Every slider in this player is single-thumb.
+ */
+function firstThumb(value: number | readonly number[]): number | undefined {
+  return typeof value === 'number' ? value : value[0];
+}
+
+function ControlButton({
+  label,
+  children,
+  className,
+  ...props
+}: React.ComponentProps<typeof Button> & { label: string }) {
   return (
     <Button
-      variant={voted ? 'primary' : 'ghost'}
-      size="sm"
-      onClick={() => {
-        onVote(!voted);
-        setVoted(!voted);
-      }}
+      variant="ghost"
+      size="icon-sm"
+      aria-label={label}
+      title={label}
+      className={cn('text-white/85 hover:bg-white/10 hover:text-white', className)}
+      {...props}
     >
-      Skip
-      {votes.needed > 0 ? (
-        <span className="font-mono text-2xs opacity-80" data-numeric>
-          {votes.votes}/{votes.needed}
-        </span>
-      ) : null}
+      {children}
     </Button>
   );
 }
+
+function IdlePlayer() {
+  return (
+    <div className="grid aspect-video w-full place-items-center rounded-xl border bg-muted/30 text-center">
+      <div className="space-y-1.5 px-6">
+        <p className="text-sm font-medium">Nothing playing</p>
+        <p className="text-xs text-muted-foreground">
+          Paste a YouTube link, a video URL, a stream, or a playlist to start.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+export type { MediaSource };

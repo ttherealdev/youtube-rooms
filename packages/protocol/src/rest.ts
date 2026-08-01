@@ -39,6 +39,8 @@ export const createRoomRequest = z.object({
   allowGuestQueue: z.boolean().default(true),
   /** Seed the queue at creation time — used by room templates. */
   initialVideoIds: z.array(videoId).max(50).default([]),
+  theme: z.string().max(32).optional(),
+  themeMode: z.enum(['light', 'dark']).optional(),
 });
 export type CreateRoomRequest = z.infer<typeof createRoomRequest>;
 
@@ -46,6 +48,7 @@ export const updateRoomRequest = createRoomRequest.partial().extend({
   voteSkipRatio: z.number().min(0).max(1).optional(),
   autoAdvance: z.boolean().optional(),
   theme: z.string().max(32).optional(),
+  themeMode: z.enum(['light', 'dark']).optional(),
   /** Explicit null clears the password; omitted leaves it unchanged. */
   password: z.string().min(4).max(128).nullable().optional(),
 });
@@ -67,9 +70,9 @@ export const roomListItem = z.object({
   hasPassword: z.boolean(),
   nowPlaying: z
     .object({
-      videoId,
+      videoId: videoId.nullable(),
       title: z.string(),
-      thumbnailUrl: z.url(),
+      thumbnailUrl: z.union([z.url(), z.literal('')]),
     })
     .nullable(),
   createdAt: z.number().int(),

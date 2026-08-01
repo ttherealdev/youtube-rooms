@@ -1,0 +1,208 @@
+'use client';
+
+import { useQuery } from '@tanstack/react-query';
+import { Link2, MessageSquare, Settings, Users, Video } from 'lucide-react';
+import Link from 'next/link';
+import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
+import { ChatPanel } from '~/components/room/chat';
+import { ParticipantsPanel } from '~/components/room/participants';
+import { Player } from '~/components/room/player';
+import { QueuePanel } from '~/components/room/queue';
+import { SettingsPanel } from '~/components/room/settings';
+import { useTheme } from '~/components/theme-provider';
+import { Badge } from '~/components/ui/badge';
+import { Button } from '~/components/ui/button';
+import { Spinner } from '~/components/ui/spinner';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '~/components/ui/tabs';
+import { api } from '~/lib/api';
+import { asThemeKey, asThemeMode } from '~/lib/themes';
+import { RoomSocket } from '~/realtime/socket';
+import { useConnection, usePermissions, useRoomStore } from '~/stores/room-store';
+
+/**
+ * The room.
+ *
+ * Owns the socket for exactly as long as the room is mounted, and is the single
+ * place where server messages become client state. Everything below it reads
+ * from the store and sends intents back through the socket it is handed.
+ */
+export function RoomShell({ slug }: { slug: string }) {
+  const [socket, setSocket] = useState<RoomSocket | null>(null);
+  const apply = useRoomStore((s) => s.apply);
+  const setConnection = useRoomStore((s) => s.setConnection);
+  const reset = useRoomStore((s) => s.reset);
+  const connection = useConnection();
+  const room = useRoomStore((s) => s.room);
+  const kicked = useRoomStore((s) => s.kicked);
+  const permissions = usePermissions();
+
+  // The room id is not in the URL — the slug is — so it has to be resolved
+  // before a socket can be opened.
+  const lookup = useQuery({
+    queryKey: ['room', slug],
+    queryFn: () => api<{ id: string }>(`/api/rooms/by-slug/${slug}`),
+    retry: false,
+  });
+
+  const roomId = lookup.data?.id;
+
+  useEffect(() => {
+    if (!roomId) return;
+
+    const next = new RoomSocket(roomId);
+    const offMessage = next.onMessage(apply);
+    const offState = next.onStateChange(setConnection);
+
+    void next.connect();
+    setSocket(next);
+
+    return () => {
+      offMessage();
+      offState();
+      next.close();
+      setSocket(null);
+      // Leaving must not strand the next room with this one's participants.
+      reset();
+    };
+  }, [roomId, apply, setConnection, reset]);
+
+  useRoomTheme(room?.settings.theme, room?.settings.themeMode);
+
+  if (lookup.isPending) {
+    return <Centered>{<Spinner />}</Centered>;
+  }
+
+  if (lookup.isError) {
+    return (
+      <Centered>
+        <div className="space-y-2 text-center">
+          <h1 className="text-lg font-medium">Room not found</h1>
+          <p className="max-w-sm text-sm text-muted-foreground">
+            This room may have closed. Rooms are removed shortly after everyone leaves.
+          </p>
+          <Button render={<Link href="/rooms" />} variant="outline" size="sm">
+            Browse rooms
+          </Button>
+        </div>
+      </Centered>
+    );
+  }
+
+  if (kicked) {
+    return (
+      <Centered>
+        <div className="space-y-2 text-center">
+          <h1 className="text-lg font-medium">
+            {kicked === 'room_closed' ? 'This room has closed' : 'You were removed'}
+          </h1>
+          <p className="max-w-sm text-sm text-muted-foreground">
+            {kicked === 'room_closed'
+              ? 'Everyone left, so the room was closed.'
+              : 'A host removed you from this room.'}
+          </p>
+          <Button render={<Link href="/rooms" />} variant="outline" size="sm">
+            Browse rooms
+          </Button>
+        </div>
+      </Centered>
+    );
+  }
+
+  return (
+    <div className="flex h-dvh flex-col">
+      <header className="flex items-center gap-3 border-b px-4 py-2.5">
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-sm font-medium">{room?.name ?? 'Loading…'}</h1>
+          <p className="truncate text-xs text-muted-foreground">
+            {connection === 'open' ? (
+              room?.topic || `${slug}`
+            ) : (
+              <span className="text-amber-500">
+                {connection === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
+              </span>
+            )}
+          </p>
+        </div>
+
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            void navigator.clipboard.writeText(window.location.href);
+            toast.success('Invite link copied');
+          }}
+        >
+          <Link2 className="size-4" />
+          <span className="hidden sm:inline">Copy link</span>
+        </Button>
+      </header>
+
+      <div className="grid min-h-0 flex-1 lg:grid-cols-[1fr_380px]">
+        <main className="min-h-0 overflow-y-auto p-4">
+          <Player socket={socket} />
+        </main>
+
+        <aside className="flex min-h-0 flex-col border-t lg:border-t-0 lg:border-l">
+          <Tabs defaultValue="chat" className="flex min-h-0 flex-1 flex-col">
+            <TabsList className="m-2 shrink-0">
+              <TabsTrigger value="chat">
+                <MessageSquare className="size-4" />
+                <span className="hidden sm:inline">Chat</span>
+              </TabsTrigger>
+              <TabsTrigger value="queue">
+                <Video className="size-4" />
+                <span className="hidden sm:inline">Queue</span>
+              </TabsTrigger>
+              <TabsTrigger value="people">
+                <Users className="size-4" />
+                <span className="hidden sm:inline">People</span>
+              </TabsTrigger>
+              {permissions?.canEditRoom ? (
+                <TabsTrigger value="settings">
+                  <Settings className="size-4" />
+                  <span className="hidden sm:inline">Settings</span>
+                </TabsTrigger>
+              ) : null}
+            </TabsList>
+
+            <TabsContent value="chat" className="min-h-0 flex-1">
+              <ChatPanel socket={socket} />
+            </TabsContent>
+            <TabsContent value="queue" className="min-h-0 flex-1">
+              <QueuePanel socket={socket} />
+            </TabsContent>
+            <TabsContent value="people" className="min-h-0 flex-1">
+              <ParticipantsPanel socket={socket} />
+            </TabsContent>
+            <TabsContent value="settings" className="min-h-0 flex-1">
+              <SettingsPanel />
+            </TabsContent>
+          </Tabs>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Apply the room's theme while inside it, and hand control back on the way out.
+ *
+ * The cleanup is the important half: without it, leaving a room would strand
+ * the visitor in the host's palette for the rest of the session.
+ */
+function useRoomTheme(theme: string | undefined, mode: string | undefined): void {
+  const { setRoomTheme } = useTheme();
+
+  useEffect(() => {
+    if (!theme) return;
+    setRoomTheme(asThemeKey(theme), asThemeMode(mode));
+    return () => setRoomTheme(null, null);
+  }, [theme, mode, setRoomTheme]);
+}
+
+function Centered({ children }: { children: React.ReactNode }) {
+  return <div className="grid min-h-dvh place-items-center p-6">{children}</div>;
+}
+
+export { Badge };

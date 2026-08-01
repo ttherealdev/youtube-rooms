@@ -5,7 +5,10 @@
 //! on the room's items so two people dragging at once cannot interleave into an
 //! inconsistent order.
 
-use crate::util;
+use crate::{
+    media::{MediaSource, SourceKind},
+    util,
+};
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgExecutor, PgPool};
 use uuid::Uuid;
@@ -14,7 +17,10 @@ use uuid::Uuid;
 pub struct QueueItem {
     pub id: Uuid,
     pub room_id: Uuid,
-    pub video_id: String,
+    /// Set only for YouTube rows; the schema enforces that pairing.
+    pub video_id: Option<String>,
+    pub source_kind: String,
+    pub source_url: String,
     pub title: String,
     pub channel_title: String,
     pub duration_seconds: i32,
@@ -25,12 +31,27 @@ pub struct QueueItem {
     pub played_at: Option<DateTime<Utc>>,
 }
 
-const COLUMNS: &str = "id, room_id, video_id, title, channel_title, duration_seconds, \
-                       thumbnail_url, added_by, added_at, position, played_at";
+impl QueueItem {
+    /// Rebuild the playable source from its stored columns.
+    ///
+    /// A row whose `source_kind` we no longer recognise — written by a newer
+    /// node during a rolling deploy — degrades to a plain file rather than
+    /// failing the whole queue read.
+    pub fn source(&self) -> MediaSource {
+        MediaSource {
+            kind: SourceKind::parse(&self.source_kind).unwrap_or(SourceKind::File),
+            url: self.source_url.clone(),
+            video_id: self.video_id.clone(),
+        }
+    }
+}
+
+const COLUMNS: &str = "id, room_id, video_id, source_kind, source_url, title, channel_title, \
+                       duration_seconds, thumbnail_url, added_by, added_at, position, played_at";
 
 #[derive(Debug, Clone)]
 pub struct NewQueueItem {
-    pub video_id: String,
+    pub source: MediaSource,
     pub title: String,
     pub channel_title: String,
     pub duration_seconds: i32,
@@ -94,27 +115,75 @@ pub async fn add(
         util::fractional_position(tail, None)
     };
 
-    let created = sqlx::query_as::<_, QueueItem>(sqlx::AssertSqlSafe(format!(
+    let created = insert_one(&mut tx, room_id, &item, position).await?;
+
+    tx.commit().await?;
+    Ok(created)
+}
+
+/// Append many items in one transaction — the playlist import path.
+///
+/// Positions are handed out from a single starting point rather than by
+/// re-reading the tail per row, so importing 500 channels is one round trip
+/// worth of contention instead of 500.
+pub async fn add_many(
+    pool: &PgPool,
+    room_id: Uuid,
+    items: &[NewQueueItem],
+) -> sqlx::Result<Vec<QueueItem>> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut tx = pool.begin().await?;
+
+    let tail: Option<f64> = sqlx::query_scalar(
+        "SELECT max(position) FROM queue_items WHERE room_id = $1 AND played_at IS NULL",
+    )
+    .bind(room_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let mut position = util::fractional_position(tail, None);
+    let mut created = Vec::with_capacity(items.len());
+
+    for item in items {
+        created.push(insert_one(&mut tx, room_id, item, position).await?);
+        // Same spacing `fractional_position` uses when appending to a tail, so
+        // a later insert-between still has room to land.
+        position += 1024.0;
+    }
+
+    tx.commit().await?;
+    Ok(created)
+}
+
+async fn insert_one(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    room_id: Uuid,
+    item: &NewQueueItem,
+    position: f64,
+) -> sqlx::Result<QueueItem> {
+    sqlx::query_as::<_, QueueItem>(sqlx::AssertSqlSafe(format!(
         "INSERT INTO queue_items
-             (id, room_id, video_id, title, channel_title, duration_seconds,
-              thumbnail_url, added_by, position)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             (id, room_id, video_id, source_kind, source_url, title, channel_title,
+              duration_seconds, thumbnail_url, added_by, position)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING {COLUMNS}"
     )))
     .bind(Uuid::now_v7())
     .bind(room_id)
-    .bind(&item.video_id)
+    .bind(item.source.video_id.as_deref())
+    .bind(item.source.kind.as_str())
+    .bind(&item.source.url)
     .bind(&item.title)
     .bind(&item.channel_title)
     .bind(item.duration_seconds)
     .bind(&item.thumbnail_url)
     .bind(item.added_by)
     .bind(position)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(created)
+    .fetch_one(&mut **tx)
+    .await
 }
 
 pub async fn remove(pool: &PgPool, room_id: Uuid, item_id: Uuid) -> sqlx::Result<bool> {

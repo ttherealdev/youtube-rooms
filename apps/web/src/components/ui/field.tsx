@@ -1,177 +1,238 @@
-import * as React from 'react';
-import { cn } from '~/lib/utils';
+"use client"
 
-export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
-  invalid?: boolean;
-}
+import { useMemo } from "react"
+import { cva, type VariantProps } from "class-variance-authority"
 
-export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, invalid, ...props }, ref) => (
-    <input
-      ref={ref}
-      aria-invalid={invalid || undefined}
+import { cn } from "~/lib/utils"
+import { Label } from "~/components/ui/label"
+import { Separator } from "~/components/ui/separator"
+
+function FieldSet({ className, ...props }: React.ComponentProps<"fieldset">) {
+  return (
+    <fieldset
+      data-slot="field-set"
       className={cn(
-        'h-10 w-full rounded-[var(--radius-md)] px-3.5 text-sm',
-        'bg-[var(--surface-base)] text-[var(--text-primary)]',
-        'border border-[var(--border-default)]',
-        'placeholder:text-[var(--text-muted)]',
-        'transition-[border-color,box-shadow] duration-150',
-        'hover:border-[var(--border-strong)]',
-        'focus:border-[var(--accent)] focus:outline-none',
-        'focus:shadow-[0_0_0_3px_color-mix(in_oklch,var(--accent)_25%,transparent)]',
-        'disabled:opacity-50 disabled:cursor-not-allowed',
-        invalid &&
-          'border-danger-500 focus:border-danger-500 focus:shadow-[0_0_0_3px_oklch(0.648_0.208_22/0.25)]',
-        className,
+        "flex flex-col gap-4 has-[>[data-slot=checkbox-group]]:gap-3 has-[>[data-slot=radio-group]]:gap-3",
+        className
       )}
       {...props}
     />
-  ),
-);
-Input.displayName = 'Input';
-
-/**
- * Label + control + error, wired together.
- *
- * The error is `role="alert"` and referenced by `aria-describedby` so it is
- * announced when it appears — a red string that only sighted users can find is
- * not a validation message.
- */
-export function Field({
-  label,
-  error,
-  hint,
-  htmlFor,
-  children,
-  className,
-}: {
-  label: string;
-  error?: string | undefined;
-  hint?: string;
-  htmlFor: string;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  const errorId = `${htmlFor}-error`;
-  const hintId = `${htmlFor}-hint`;
-
-  return (
-    <div className={cn('flex flex-col gap-1.5', className)}>
-      <label htmlFor={htmlFor} className="text-sm font-medium text-[var(--text-secondary)]">
-        {label}
-      </label>
-
-      {React.isValidElement(children)
-        ? React.cloneElement(children as React.ReactElement<Record<string, unknown>>, {
-            id: htmlFor,
-            'aria-describedby': error ? errorId : hint ? hintId : undefined,
-          })
-        : children}
-
-      {hint && !error ? (
-        <p id={hintId} className="text-xs text-[var(--text-muted)]">
-          {hint}
-        </p>
-      ) : null}
-
-      {error ? (
-        <p id={errorId} role="alert" className="text-xs text-danger-500">
-          {error}
-        </p>
-      ) : null}
-    </div>
-  );
+  )
 }
 
-export function Badge({
-  children,
-  tone = 'neutral',
+function FieldLegend({
   className,
-}: {
-  children: React.ReactNode;
-  tone?: 'neutral' | 'accent' | 'success' | 'live' | 'warning';
-  className?: string;
-}) {
-  const tones = {
-    neutral: 'bg-[var(--surface-hover)] text-[var(--text-secondary)]',
-    accent: 'bg-[color-mix(in_oklch,var(--accent)_18%,transparent)] text-[var(--accent)]',
-    success: 'bg-success-500/15 text-success-500',
-    live: 'bg-live-500/15 text-live-500',
-    warning: 'bg-warning-500/15 text-warning-500',
-  } as const;
-
+  variant = "legend",
+  ...props
+}: React.ComponentProps<"legend"> & { variant?: "legend" | "label" }) {
   return (
-    <span
+    <legend
+      data-slot="field-legend"
+      data-variant={variant}
       className={cn(
-        'inline-flex items-center gap-1 rounded-full px-2 py-0.5',
-        'text-2xs font-medium tracking-wide',
-        tones[tone],
-        className,
+        "mb-1.5 font-medium data-[variant=label]:text-sm data-[variant=legend]:text-base",
+        className
       )}
-    >
-      {children}
-    </span>
-  );
+      {...props}
+    />
+  )
 }
 
-/** Pulsing dot for "live now". */
-export function LiveDot({ className }: { className?: string }) {
+function FieldGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
-    <span className={cn('relative flex size-2', className)} aria-hidden>
-      <span className="absolute inline-flex size-full animate-ping rounded-full bg-live-500 opacity-70" />
-      <span className="relative inline-flex size-2 rounded-full bg-live-500" />
-    </span>
-  );
+    <div
+      data-slot="field-group"
+      className={cn(
+        "group/field-group @container/field-group flex w-full flex-col gap-5 data-[slot=checkbox-group]:gap-3 *:data-[slot=field-group]:gap-4",
+        className
+      )}
+      {...props}
+    />
+  )
 }
 
-export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn('skeleton rounded-[var(--radius-sm)]', className)} aria-hidden />;
+const fieldVariants = cva(
+  "group/field flex w-full gap-2 data-[invalid=true]:text-destructive",
+  {
+    variants: {
+      orientation: {
+        vertical: "flex-col *:w-full [&>.sr-only]:w-auto",
+        horizontal:
+          "flex-row items-center has-[>[data-slot=field-content]]:items-start *:data-[slot=field-label]:flex-auto has-[>[data-slot=field-content]]:[&>[role=checkbox],[role=radio]]:mt-px",
+        responsive:
+          "flex-col *:w-full @md/field-group:flex-row @md/field-group:items-center @md/field-group:*:w-auto @md/field-group:has-[>[data-slot=field-content]]:items-start @md/field-group:*:data-[slot=field-label]:flex-auto [&>.sr-only]:w-auto @md/field-group:has-[>[data-slot=field-content]]:[&>[role=checkbox],[role=radio]]:mt-px",
+      },
+    },
+    defaultVariants: {
+      orientation: "vertical",
+    },
+  }
+)
+
+function Field({
+  className,
+  orientation = "vertical",
+  ...props
+}: React.ComponentProps<"div"> & VariantProps<typeof fieldVariants>) {
+  return (
+    <div
+      role="group"
+      data-slot="field"
+      data-orientation={orientation}
+      className={cn(fieldVariants({ orientation }), className)}
+      {...props}
+    />
+  )
 }
 
-export function Panel({
+function FieldContent({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="field-content"
+      className={cn(
+        "group/field-content flex flex-1 flex-col gap-0.5 leading-snug",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function FieldLabel({
+  className,
+  ...props
+}: React.ComponentProps<typeof Label>) {
+  return (
+    <Label
+      data-slot="field-label"
+      className={cn(
+        "group/field-label peer/field-label flex w-fit gap-2 leading-snug group-data-[disabled=true]/field:opacity-50 has-data-checked:border-primary/30 has-data-checked:bg-primary/5 has-[>[data-slot=field]]:rounded-lg has-[>[data-slot=field]]:border *:data-[slot=field]:p-2.5 dark:has-data-checked:border-primary/20 dark:has-data-checked:bg-primary/10",
+        "has-[>[data-slot=field]]:w-full has-[>[data-slot=field]]:flex-col",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function FieldTitle({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="field-label"
+      className={cn(
+        "flex w-fit items-center gap-2 text-sm font-medium group-data-[disabled=true]/field:opacity-50",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function FieldDescription({ className, ...props }: React.ComponentProps<"p">) {
+  return (
+    <p
+      data-slot="field-description"
+      className={cn(
+        "text-left text-sm leading-normal font-normal text-muted-foreground group-has-data-horizontal/field:text-balance [[data-variant=legend]+&]:-mt-1.5",
+        "last:mt-0 nth-last-2:-mt-1",
+        "[&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function FieldSeparator({
   children,
   className,
-  as: Component = 'div',
-}: {
-  children: React.ReactNode;
-  className?: string;
-  as?: React.ElementType;
-}) {
-  return <Component className={cn('panel', className)}>{children}</Component>;
-}
-
-/**
- * Empty states carry an illustration, not just text — they are the moments a
- * new user is most likely to bounce.
- */
-export function EmptyState({
-  illustration,
-  title,
-  description,
-  action,
-  className,
-}: {
-  illustration?: React.ReactNode;
-  title: string;
-  description?: string;
-  action?: React.ReactNode;
-  className?: string;
+  ...props
+}: React.ComponentProps<"div"> & {
+  children?: React.ReactNode
 }) {
   return (
     <div
+      data-slot="field-separator"
+      data-content={!!children}
       className={cn(
-        'flex flex-col items-center justify-center gap-4 px-6 py-12 text-center',
-        className,
+        "relative -my-2 h-5 text-sm group-data-[variant=outline]/field-group:-mb-2",
+        className
       )}
+      {...props}
     >
-      {illustration ? <div className="opacity-90">{illustration}</div> : null}
-      <div className="space-y-1.5">
-        <h3 className="text-base font-semibold text-[var(--text-primary)]">{title}</h3>
-        {description ? (
-          <p className="mx-auto max-w-sm text-sm text-[var(--text-muted)]">{description}</p>
-        ) : null}
-      </div>
-      {action}
+      <Separator className="absolute inset-0 top-1/2" />
+      {children && (
+        <span
+          className="relative mx-auto block w-fit bg-background px-2 text-muted-foreground"
+          data-slot="field-separator-content"
+        >
+          {children}
+        </span>
+      )}
     </div>
-  );
+  )
+}
+
+function FieldError({
+  className,
+  children,
+  errors,
+  ...props
+}: React.ComponentProps<"div"> & {
+  errors?: Array<{ message?: string } | undefined>
+}) {
+  const content = useMemo(() => {
+    if (children) {
+      return children
+    }
+
+    if (!errors?.length) {
+      return null
+    }
+
+    const uniqueErrors = [
+      ...new Map(errors.map((error) => [error?.message, error])).values(),
+    ]
+
+    if (uniqueErrors?.length == 1) {
+      return uniqueErrors[0]?.message
+    }
+
+    return (
+      <ul className="ml-4 flex list-disc flex-col gap-1">
+        {uniqueErrors.map(
+          (error, index) =>
+            error?.message && <li key={index}>{error.message}</li>
+        )}
+      </ul>
+    )
+  }, [children, errors])
+
+  if (!content) {
+    return null
+  }
+
+  return (
+    <div
+      role="alert"
+      data-slot="field-error"
+      className={cn("text-sm font-normal text-destructive", className)}
+      {...props}
+    >
+      {content}
+    </div>
+  )
+}
+
+export {
+  Field,
+  FieldLabel,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLegend,
+  FieldSeparator,
+  FieldSet,
+  FieldContent,
+  FieldTitle,
 }

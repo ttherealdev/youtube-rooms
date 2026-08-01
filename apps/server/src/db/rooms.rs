@@ -18,6 +18,13 @@ pub struct Room {
     pub visibility: String,
     pub category: String,
     pub host_id: Uuid,
+    /// Permanent creator. Unlike `host_id` this never moves on an automatic
+    /// handover, which is what lets a returning creator reclaim their room.
+    pub owner_id: Option<Uuid>,
+    /// Who the host nominated to inherit the room.
+    pub successor_id: Option<Uuid>,
+    /// When the last participant left, or NULL while anyone is present.
+    pub empty_since: Option<DateTime<Utc>>,
     pub password_hash: Option<String>,
     pub max_participants: i32,
     pub settings: sqlx::types::Json<RoomSettings>,
@@ -39,8 +46,14 @@ pub struct RoomSettings {
     pub auto_advance: bool,
     #[serde(default)]
     pub shuffle: bool,
+    /// Key into the shared theme registry. The host picks it; every client in
+    /// the room renders with it.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// `light` or `dark`. Kept separate from the theme so a host can pick a
+    /// palette without also forcing everyone into a mode.
+    #[serde(default = "default_theme_mode")]
+    pub theme_mode: String,
 }
 
 const fn default_true() -> bool {
@@ -50,7 +63,10 @@ fn default_skip_ratio() -> f64 {
     0.5
 }
 fn default_theme() -> String {
-    "midnight".to_string()
+    "default".to_string()
+}
+fn default_theme_mode() -> String {
+    "dark".to_string()
 }
 
 impl Default for RoomSettings {
@@ -62,12 +78,14 @@ impl Default for RoomSettings {
             auto_advance: true,
             shuffle: false,
             theme: default_theme(),
+            theme_mode: default_theme_mode(),
         }
     }
 }
 
-const ROOM_COLUMNS: &str = "id, slug, name, topic, visibility, category, host_id, password_hash, \
-                            max_participants, settings, active_participants, created_at, last_active_at";
+const ROOM_COLUMNS: &str = "id, slug, name, topic, visibility, category, host_id, owner_id, \
+                            successor_id, empty_since, password_hash, max_participants, settings, \
+                            active_participants, created_at, last_active_at";
 
 #[derive(Debug, Clone)]
 pub struct NewRoom<'a> {
@@ -87,9 +105,9 @@ pub async fn create(pool: &PgPool, slug: &str, new_room: NewRoom<'_>) -> sqlx::R
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
 
     let room = sqlx::query_as::<_, Room>(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO rooms (id, slug, name, topic, visibility, category, host_id,
+        "INSERT INTO rooms (id, slug, name, topic, visibility, category, host_id, owner_id,
                             password_hash, max_participants, settings)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $10)
          RETURNING {ROOM_COLUMNS}"
     )))
     .bind(Uuid::now_v7())
@@ -278,15 +296,24 @@ pub async fn set_role(
 ///
 /// Demote-then-promote inside a transaction, because `room_members_single_host_idx`
 /// forbids two hosts existing even momentarily.
+/// Hand the room to someone else.
+///
+/// `permanent` distinguishes the two ways a room changes hands, and getting it
+/// wrong is user-visible. An explicit transfer is a decision — the outgoing
+/// host meant it, so ownership moves and they do not silently take the room
+/// back next time they open it. An automatic promotion, when a host simply
+/// closes their laptop, is custody rather than ownership: `owner_id` stays put
+/// so the creator reclaims the room on their return.
 pub async fn transfer_host(
     pool: &PgPool,
     room_id: Uuid,
     from_user: Uuid,
     to_user: Uuid,
+    permanent: bool,
 ) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
 
-    sqlx::query("UPDATE room_members SET role = 'moderator' WHERE room_id = $1 AND user_id = $2")
+    sqlx::query("UPDATE room_members SET role = 'cohost' WHERE room_id = $1 AND user_id = $2")
         .bind(room_id)
         .bind(from_user)
         .execute(&mut *tx)
@@ -301,13 +328,84 @@ pub async fn transfer_host(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE rooms SET host_id = $2 WHERE id = $1")
-        .bind(room_id)
-        .bind(to_user)
-        .execute(&mut *tx)
-        .await?;
+    // Clearing the successor matters: a nomination is about *this* host's
+    // departure, and leaving it in place would let a stale name inherit a room
+    // from someone who never chose them.
+    if permanent {
+        sqlx::query("UPDATE rooms SET host_id = $2, owner_id = $2, successor_id = NULL WHERE id = $1")
+            .bind(room_id)
+            .bind(to_user)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query("UPDATE rooms SET host_id = $2, successor_id = NULL WHERE id = $1")
+            .bind(room_id)
+            .bind(to_user)
+            .execute(&mut *tx)
+            .await?;
+    }
 
     tx.commit().await
+}
+
+/// Record the host's nomination, or clear it with `None`.
+pub async fn set_successor(
+    pool: &PgPool,
+    room_id: Uuid,
+    successor: Option<Uuid>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE rooms SET successor_id = $2 WHERE id = $1")
+        .bind(room_id)
+        .bind(successor)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Start, or cancel, the empty-room grace period.
+///
+/// Called on every join and leave. `COALESCE` on the way in is what makes the
+/// grace period a real one: two people leaving in quick succession must not
+/// restart the clock, or a busy room that empties in stages never closes.
+pub async fn set_emptiness(pool: &PgPool, room_id: Uuid, is_empty: bool) -> sqlx::Result<()> {
+    if is_empty {
+        sqlx::query(
+            "UPDATE rooms SET empty_since = COALESCE(empty_since, now())
+             WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(room_id)
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query("UPDATE rooms SET empty_since = NULL WHERE id = $1")
+            .bind(room_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Close every room that has been empty longer than the grace period.
+///
+/// Returns the rooms it closed so the caller can tear down their runtime state.
+/// The `active_participants = 0` guard is belt-and-braces against a stale
+/// `empty_since` on a room that quietly refilled.
+pub async fn close_expired_empty_rooms(
+    pool: &PgPool,
+    grace: std::time::Duration,
+) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "UPDATE rooms
+            SET deleted_at = now()
+          WHERE deleted_at IS NULL
+            AND empty_since IS NOT NULL
+            AND active_participants = 0
+            AND empty_since < now() - make_interval(secs => $1)
+        RETURNING id",
+    )
+    .bind(grace.as_secs_f64())
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn ban(pool: &PgPool, room_id: Uuid, user_id: Uuid, by: Uuid) -> sqlx::Result<()> {
@@ -529,7 +627,8 @@ mod tests {
         assert!(settings.allow_guest_control);
         // Everything unspecified must fall back, not fail.
         assert!(settings.allow_guest_queue);
-        assert_eq!(settings.theme, "midnight");
+        assert_eq!(settings.theme, "default");
+        assert_eq!(settings.theme_mode, "dark");
         assert!((settings.vote_skip_ratio - 0.5).abs() < f64::EPSILON);
     }
 

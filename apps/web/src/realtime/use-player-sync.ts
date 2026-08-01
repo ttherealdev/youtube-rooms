@@ -1,267 +1,135 @@
-import { decideCorrection, positionAt, SYNC, type Timeline } from '@youtube-room/protocol';
-import { useCallback, useEffect, useRef, useState } from 'react';
+'use client';
+
+import { decideCorrection, positionAt, SYNC, type Timeline } from '@playercn/protocol';
+import { useEffect, useRef } from 'react';
+import type { PlayerEngine } from './player/engine';
 import type { RoomSocket } from './socket';
-import {
-  describePlayerError,
-  loadYouTubeApi,
-  PLAYER_VARS,
-  PlayerState,
-  type YouTubePlayer,
-} from './youtube';
 
 /**
- * Keeps one browser's player locked to the authoritative timeline.
+ * Keep a player on the room's timeline.
  *
- * This is the client half of ADR 0005. The decision logic itself lives in the
- * pure `decideCorrection` (in `@youtube-room/protocol`, exhaustively tested);
- * everything here is the imperative plumbing around it.
+ * This is the client half of ADR 0005. The rules that matter:
  *
- * The important non-obvious detail: **the playback head never enters React
- * state.** It is written to a ref every animation frame and read by whatever
- * needs it. A `useState` here would re-render the entire room subtree at
- * 60 Hz — chat, queue, participant list and all (ADR 0008).
+ *   * Position is **derived** from the timeline against server time, never
+ *     tracked incrementally. A late join, a tab that was backgrounded for ten
+ *     minutes and a normal tick all take the identical code path.
+ *   * Corrections are graded — do nothing, nudge the rate, or seek — because a
+ *     seek is visible and a nudge is not. `decideCorrection` owns that policy
+ *     and is exhaustively tested in the protocol package.
+ *   * Nothing here lives in React state. The loop runs on an interval and talks
+ *     to the player through refs; putting the playback head in state would
+ *     re-render the entire room several times a second.
  */
-
-export interface PlayerSyncHandle {
-  /** Attach to the container the iframe should replace. */
-  containerRef: (node: HTMLDivElement | null) => void;
-  /** Live playback position, in seconds. Read from rAF, never rendered directly. */
-  positionRef: React.RefObject<number>;
-  durationRef: React.RefObject<number>;
-  ready: boolean;
-  buffering: boolean;
-  error: string | null;
-  /** Last measured drift, for the debug overlay. */
-  driftRef: React.RefObject<number>;
-  setVolume: (value: number) => void;
-  getVolume: () => number;
-  requestFullscreen: () => void;
-}
-
 export function usePlayerSync(
-  socket: RoomSocket | null,
+  engine: PlayerEngine | null,
   timeline: Timeline | null,
-): PlayerSyncHandle {
-  const playerRef = useRef<YouTubePlayer | null>(null);
-  const containerElement = useRef<HTMLDivElement | null>(null);
-  const positionRef = useRef(0);
-  const durationRef = useRef(0);
-  const driftRef = useRef(0);
-  const loadedVideoRef = useRef<string | null>(null);
-  const nudgingRef = useRef(false);
-  const timelineRef = useRef<Timeline | null>(timeline);
+  socket: RoomSocket | null,
+  options: { enabled?: boolean } = {},
+): void {
+  const enabled = options.enabled ?? true;
 
-  const [ready, setReady] = useState(false);
-  const [buffering, setBuffering] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+  // Read through refs so changing the timeline does not tear down the loop.
+  const engineRef = useRef(engine);
+  const timelineRef = useRef(timeline);
+  const socketRef = useRef(socket);
+  engineRef.current = engine;
   timelineRef.current = timeline;
+  socketRef.current = socket;
 
-  const containerRef = useCallback((node: HTMLDivElement | null) => {
-    containerElement.current = node;
-  }, []);
+  /** Rate we last pushed, so a nudge is not reapplied every tick. */
+  const appliedRate = useRef(1);
 
-  // --- Create the player once -----------------------------------------------
   useEffect(() => {
-    let cancelled = false;
-    const host = containerElement.current;
-    if (!host) return;
+    if (!enabled) return;
 
-    void loadYouTubeApi()
-      .then((api) => {
-        if (cancelled) return;
+    const tick = () => {
+      const player = engineRef.current;
+      const tl = timelineRef.current;
+      const sock = socketRef.current;
+      if (!player || !tl || !sock || !player.ready() || tl.source === null) return;
 
-        const mount = document.createElement('div');
-        host.appendChild(mount);
+      const target = positionAt(tl, sock.clock.serverNow());
+      const observed = player.currentTime();
+      const { confident } = sock.clock.status;
 
-        playerRef.current = new api.Player(mount, {
-          playerVars: { ...PLAYER_VARS },
-          events: {
-            onReady: () => {
-              if (!cancelled) setReady(true);
-            },
-            onStateChange: (event) => {
-              if (cancelled) return;
-              setBuffering(event.data === PlayerState.Buffering);
-              if (event.data === PlayerState.Playing) {
-                durationRef.current = event.target.getDuration();
-              }
-            },
-            onError: (event) => {
-              if (!cancelled) setError(describePlayerError(event.data));
-            },
-          },
-        });
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled) {
-          setError(cause instanceof Error ? cause.message : 'Could not load the player.');
+      // Paused/playing is applied before position: correcting the position of a
+      // player that is in the wrong play state just fights the user.
+      if (tl.paused) {
+        player.pause();
+        // A paused room still has a definite position, and a player that
+        // resumed on its own must be pulled back to it.
+        if (Math.abs(observed - target) > SYNC.DEAD_BAND_MS / 1000) {
+          player.seek(target);
         }
+        return;
+      }
+
+      player.play();
+
+      const correction = decideCorrection(observed, target, tl.rate, {
+        buffering: player.buffering(),
+        confident,
+        paused: tl.paused,
       });
 
-    return () => {
-      cancelled = true;
-      playerRef.current?.destroy();
-      playerRef.current = null;
-    };
-  }, []);
-
-  // --- Load / swap the video ------------------------------------------------
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player || !ready || !socket) return;
-
-    const videoId = timeline?.videoId ?? null;
-    if (videoId === loadedVideoRef.current) return;
-
-    loadedVideoRef.current = videoId;
-    setError(null);
-
-    if (!videoId) {
-      player.pauseVideo();
-      return;
-    }
-
-    // Start at the derived position, not at zero — a late joiner must not
-    // rewind everyone else, and must not begin from the top themselves.
-    const startAt = timeline ? positionAt(timeline, socket.clock.serverNow()) : 0;
-
-    if (timeline?.paused) {
-      player.cueVideoById(videoId, startAt);
-    } else {
-      player.loadVideoById(videoId, startAt);
-    }
-  }, [ready, socket, timeline]);
-
-  // --- Follow play/pause and rate ------------------------------------------
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player || !ready || !timeline?.videoId) return;
-
-    const state = player.getPlayerState();
-    const isPlaying = state === PlayerState.Playing || state === PlayerState.Buffering;
-
-    if (timeline.paused && isPlaying) player.pauseVideo();
-    if (!timeline.paused && !isPlaying) player.playVideo();
-
-    // Only reset the rate when we are not mid-nudge, or the correction loop
-    // would immediately undo its own convergence every time this effect runs.
-    if (!nudgingRef.current && player.getPlaybackRate() !== timeline.rate) {
-      player.setPlaybackRate(timeline.rate);
-    }
-  }, [ready, timeline]);
-
-  // --- The correction loop --------------------------------------------------
-  useEffect(() => {
-    if (!ready || !socket) return;
-
-    const interval = setInterval(() => {
-      const player = playerRef.current;
-      const current = timelineRef.current;
-      if (!player || !current?.videoId) return;
-
-      // A backgrounded tab is throttled to ~1 Hz and its player may be
-      // suspended entirely; any "drift" measured there is an artefact.
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-
-      const observed = player.getCurrentTime();
-      const target = positionAt(current, socket.clock.serverNow());
-      driftRef.current = (observed - target) * 1000;
-
-      const state = player.getPlayerState();
-      const decision = decideCorrection(observed, target, current.rate, {
-        buffering: state === PlayerState.Buffering,
-        confident: socket.clock.status.confident,
-        paused: current.paused,
-      });
-
-      switch (decision.action) {
+      switch (correction.action) {
         case 'seek':
-          player.seekTo(decision.position, true);
-          player.setPlaybackRate(current.rate);
-          nudgingRef.current = false;
+          player.seek(correction.position);
+          // The nominal rate is restored alongside the seek; leaving a nudge
+          // applied after a hard correction makes the player drift straight
+          // back out the other side.
+          if (appliedRate.current !== tl.rate) {
+            player.setRate(tl.rate);
+            appliedRate.current = tl.rate;
+          }
           break;
 
         case 'nudge':
-          player.setPlaybackRate(decision.playbackRate);
-          nudgingRef.current = true;
+          if (Math.abs(appliedRate.current - correction.playbackRate) > 1e-6) {
+            player.setRate(correction.playbackRate);
+            appliedRate.current = correction.playbackRate;
+          }
           break;
 
         case 'none':
-          // Converged — restore the nominal rate so the nudge does not
-          // overshoot into drift in the opposite direction.
-          if (nudgingRef.current) {
-            player.setPlaybackRate(current.rate);
-            nudgingRef.current = false;
+          // Back to the room's real speed once we are inside the dead band.
+          if (Math.abs(appliedRate.current - tl.rate) > 1e-6) {
+            player.setRate(tl.rate);
+            appliedRate.current = tl.rate;
           }
           break;
       }
-    }, SYNC.CHECK_INTERVAL_MS);
-
-    return () => clearInterval(interval);
-  }, [ready, socket]);
-
-  // --- Drift telemetry ------------------------------------------------------
-  useEffect(() => {
-    if (!ready || !socket) return;
-
-    const interval = setInterval(() => {
-      const player = playerRef.current;
-      if (!player || !timelineRef.current?.videoId) return;
-
-      socket.send({
-        t: 'sync_report',
-        driftMs: driftRef.current,
-        position: Math.max(0, player.getCurrentTime()),
-        buffering: player.getPlayerState() === PlayerState.Buffering,
-      });
-    }, SYNC.REPORT_INTERVAL_MS);
-
-    return () => clearInterval(interval);
-  }, [ready, socket]);
-
-  // --- Position tick for the progress bar -----------------------------------
-  useEffect(() => {
-    if (!ready) return;
-    let frame = 0;
-
-    const tick = () => {
-      const player = playerRef.current;
-      if (player) {
-        positionRef.current = player.getCurrentTime();
-        const duration = player.getDuration();
-        if (duration > 0) durationRef.current = duration;
-      }
-      frame = requestAnimationFrame(tick);
     };
 
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [ready]);
+    const interval = setInterval(tick, SYNC.CHECK_INTERVAL_MS);
+    tick();
+    return () => clearInterval(interval);
+  }, [enabled]);
 
-  const setVolume = useCallback((value: number) => {
-    playerRef.current?.setVolume(Math.max(0, Math.min(100, value)));
-  }, []);
+  // Drift reporting is a separate, much slower loop: it feeds the server's SLO
+  // histogram and has nothing to do with correcting this client.
+  useEffect(() => {
+    if (!enabled) return;
 
-  const getVolume = useCallback(() => playerRef.current?.getVolume() ?? 100, []);
+    const report = () => {
+      const player = engineRef.current;
+      const tl = timelineRef.current;
+      const sock = socketRef.current;
+      if (!player || !tl || !sock || !player.ready() || tl.source === null || tl.paused) return;
 
-  const requestFullscreen = useCallback(() => {
-    const host = containerElement.current;
-    if (!host) return;
-    if (document.fullscreenElement) void document.exitFullscreen();
-    else void host.requestFullscreen?.();
-  }, []);
+      const target = positionAt(tl, sock.clock.serverNow());
+      const observed = player.currentTime();
+      if (!Number.isFinite(observed)) return;
 
-  return {
-    containerRef,
-    positionRef,
-    durationRef,
-    driftRef,
-    ready,
-    buffering,
-    error,
-    setVolume,
-    getVolume,
-    requestFullscreen,
-  };
+      sock.send({
+        t: 'sync_report',
+        driftMs: (observed - target) * 1000,
+        position: observed,
+        buffering: player.buffering(),
+      });
+    };
+
+    const interval = setInterval(report, SYNC.REPORT_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [enabled]);
 }

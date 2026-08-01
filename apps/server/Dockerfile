@@ -33,15 +33,15 @@ COPY migrations ./migrations
 # No database is reachable at build time. Queries are runtime-bound
 # (see ADR 0003), and this makes that explicit rather than accidental.
 ENV SQLX_OFFLINE=true
-RUN cargo build --release --locked --bin youtube-room-server \
- && strip target/release/youtube-room-server
+RUN cargo build --release --locked --bin playercn-server \
+ && strip target/release/playercn-server
 
 # --- 3. Run ------------------------------------------------------------------
 # `cc` rather than `static`: the binary links libgcc and libc through ring.
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
 WORKDIR /app
-COPY --from=builder /build/target/release/youtube-room-server /app/youtube-room-server
+COPY --from=builder /build/target/release/playercn-server /app/playercn-server
 # Migrations are applied at boot, so they must ship with the binary.
 COPY --from=builder /build/migrations /app/migrations
 
@@ -52,14 +52,14 @@ EXPOSE 8080
 # Distroless has no shell, so the health check must be an exec-form command.
 # The binary answers `--health-check` by probing its own readiness endpoint.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-  CMD ["/app/youtube-room-server", "--health-check"]
+  CMD ["/app/playercn-server", "--health-check"]
 
 # `nonroot` (uid 65532) is baked into the base image; never run as root.
 USER nonroot:nonroot
 
-LABEL org.opencontainers.image.title="youtube-room-server" \
-      org.opencontainers.image.description="Authoritative realtime service for YouTube Room" \
-      org.opencontainers.image.source="https://github.com/your-org/youtube-room" \
+LABEL org.opencontainers.image.title="playercn-server" \
+      org.opencontainers.image.description="Authoritative realtime service for playercn" \
+      org.opencontainers.image.source="https://github.com/your-org/playercn" \
       org.opencontainers.image.licenses="MIT"
 
-ENTRYPOINT ["/app/youtube-room-server"]
+ENTRYPOINT ["/app/playercn-server"]

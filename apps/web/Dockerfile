@@ -19,10 +19,7 @@ ENV PATH="$PNPM_HOME:$PATH"
 FROM base AS builder
 WORKDIR /repo
 
-# Manifests first, so a source-only change reuses the install layer. The
-# workspace's own node_modules never leaves this stage — it is a tree of
-# symlinks into /pnpm/store, which is a cache mount and therefore absent from
-# the image. `pnpm deploy` below is what produces a copyable tree.
+# Manifests first, so a source-only change reuses the install layer.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/
 COPY packages/protocol/package.json packages/protocol/
@@ -32,28 +29,18 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 
 COPY . .
 
-# Public config is inlined into the bundle at build time, so these must be
-# present here rather than only at runtime.
-ARG PUBLIC_API_URL=""
-ARG PUBLIC_WS_URL=""
-ENV PUBLIC_API_URL=$PUBLIC_API_URL \
-    PUBLIC_WS_URL=$PUBLIC_WS_URL \
+# `NEXT_PUBLIC_*` values are inlined into the client bundle at build time, so
+# they have to be present here rather than only at runtime. Setting them in the
+# deploy environment alone leaves the browser talking to its own origin, which
+# serves no /api routes in production.
+ARG NEXT_PUBLIC_API_URL=""
+ARG NEXT_PUBLIC_WS_URL=""
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL \
+    NEXT_TELEMETRY_DISABLED=1 \
     NODE_ENV=production
 
-RUN pnpm --filter @youtube-room/web build
-
-# Vite externalises every dependency from the SSR bundle rather than inlining
-# it, so dist/server/server.js still does `import "react"` at runtime and the
-# image needs a real node_modules. `pnpm deploy` builds one that is
-# self-contained: prod dependencies only, workspace packages copied in rather
-# than symlinked out to /repo, and every remaining link relative and internal —
-# which is what makes the tree survive being copied into the next stage.
-#
-# --legacy is not optional: since pnpm v10, deploying a workspace that does not
-# set `inject-workspace-packages=true` fails without it, and turning that on
-# would change how every package in the repo links during development.
-RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm --filter @youtube-room/web deploy --prod --legacy /runtime
+RUN pnpm --filter @playercn/web build
 
 # --- Runtime -----------------------------------------------------------------
 FROM node:26-alpine AS runtime
@@ -64,19 +51,18 @@ WORKDIR /app
 RUN apk add --no-cache tini
 
 ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
-    HOST=0.0.0.0
+    HOSTNAME=0.0.0.0
 
-# server.js resolves ./dist/server/server.js and ./dist/client relative to
-# itself, so this layout has to match the one it had in the builder.
-#
-# package.json comes along for its `"type": "module"`: module kind is resolved
-# from the nearest package.json, and without one every .js here would be read as
-# CommonJS and the bundle's first `export` would be a syntax error.
-COPY --from=builder --chown=node:node /runtime/package.json ./package.json
-COPY --from=builder --chown=node:node /runtime/node_modules ./node_modules
-COPY --from=builder --chown=node:node /repo/apps/web/dist ./dist
-COPY --from=builder --chown=node:node /repo/apps/web/server.js ./server.js
+# `output: 'standalone'` already produced a traced node_modules and its own
+# server.js, so there is no install step here. It deliberately does *not*
+# include static assets or public files — those are copied separately, and
+# missing either one yields a server that boots and then serves an unstyled
+# page with no JavaScript.
+COPY --from=builder --chown=node:node /repo/apps/web/.next/standalone ./
+COPY --from=builder --chown=node:node /repo/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder --chown=node:node /repo/apps/web/public ./apps/web/public
 
 USER node
 EXPOSE 3000
@@ -84,9 +70,11 @@ EXPOSE 3000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-LABEL org.opencontainers.image.title="youtube-room-web" \
-      org.opencontainers.image.description="YouTube Room web client" \
+LABEL org.opencontainers.image.title="playercn-web" \
+      org.opencontainers.image.description="playercn web client" \
       org.opencontainers.image.licenses="MIT"
 
+# For a workspace package the standalone server lands at the path it occupied
+# in the repo, not at the root of the output.
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "server.js"]
+CMD ["node", "apps/web/server.js"]

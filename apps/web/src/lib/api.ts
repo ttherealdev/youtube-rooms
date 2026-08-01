@@ -1,4 +1,4 @@
-import { apiError } from '@youtube-room/protocol';
+import { apiError } from '@playercn/protocol';
 
 /**
  * The HTTP client.
@@ -11,7 +11,7 @@ import { apiError } from '@youtube-room/protocol';
  *    share a single in-flight refresh rather than starting a stampede.
  */
 
-const BASE = import.meta.env.PUBLIC_API_URL ?? '';
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 /**
  * Absolute URL for an API path.

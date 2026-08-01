@@ -7,7 +7,7 @@ import type {
   ServerMessage,
   Timeline,
   UserSummary,
-} from '@youtube-room/protocol';
+} from '@playercn/protocol';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 

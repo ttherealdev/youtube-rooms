@@ -5,9 +5,15 @@ import { decideCorrection, positionAt, SYNC } from '../src/timeline.ts';
 
 const T0 = 1_700_000_000_000;
 
+const YOUTUBE_SOURCE = {
+  kind: 'youtube',
+  url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+  videoId: 'dQw4w9WgXcQ',
+} as const;
+
 function playing(overrides: Partial<Timeline> = {}): Timeline {
   return {
-    videoId: 'dQw4w9WgXcQ',
+    source: YOUTUBE_SOURCE,
     anchorPos: 0,
     anchorAt: T0,
     rate: 1,
@@ -15,6 +21,7 @@ function playing(overrides: Partial<Timeline> = {}): Timeline {
     version: 1,
     queueItemId: null,
     loop: false,
+    duration: null,
     ...overrides,
   };
 }
@@ -35,7 +42,7 @@ describe('positionAt', () => {
   });
 
   it('reports zero for an idle room', () => {
-    assert.equal(positionAt(playing({ videoId: null }), T0 + 10_000), 0);
+    assert.equal(positionAt(playing({ source: null }), T0 + 10_000), 0);
   });
 
   it('never returns a negative position', () => {

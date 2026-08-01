@@ -52,13 +52,30 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
             continue;
         }
 
-        let (ended, looping) = {
+        let (ended, looping, live) = {
             let state_guard = room.state.lock().await;
             match state_guard.timeline.as_ref() {
-                Some(timeline) => (timeline.has_ended(now), timeline.loop_current),
-                None => (false, false),
+                Some(timeline) => (
+                    timeline.has_ended(now),
+                    timeline.loop_current,
+                    timeline
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.kind.may_be_live()),
+                ),
+                None => (false, false, false),
             }
         };
+
+        // A live stream has no end to reach. In practice its duration is never
+        // known — a browser reports `Infinity`, which `set_duration` refuses —
+        // so `has_ended` is already false. Checking the kind directly means
+        // this does not quietly depend on that coincidence: one client
+        // reporting a bogus finite duration would otherwise skip the channel
+        // everyone is watching.
+        if live {
+            continue;
+        }
 
         if !ended {
             continue;

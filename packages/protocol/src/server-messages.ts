@@ -21,7 +21,15 @@ export const roomSnapshot = z.object({
   topic: z.string().nullable(),
   visibility: roomVisibility,
   category: roomCategory,
+  /** Who controls the room right now; moves when it changes hands. */
   hostId: uuid,
+  /**
+   * Who created it. Never moves on an automatic handover, which is what lets a
+   * returning creator reclaim a room that was passed on while they were away.
+   */
+  ownerId: uuid.nullable(),
+  /** Who the host nominated to inherit the room. */
+  successorId: uuid.nullable(),
   createdAt: z.number().int(),
   maxParticipants: z.number().int().positive(),
   /** Non-host playback control, vote-skip threshold, etc. */
@@ -31,7 +39,9 @@ export const roomSnapshot = z.object({
     voteSkipRatio: z.number().min(0).max(1),
     autoAdvance: z.boolean(),
     shuffle: z.boolean(),
+    /** Theme key every client in the room renders with. Host-controlled. */
     theme: z.string(),
+    themeMode: z.enum(['light', 'dark']),
   }),
 });
 export type RoomSnapshot = z.infer<typeof roomSnapshot>;

@@ -1,4 +1,4 @@
-//! YouTube Room — the authoritative realtime service.
+//! playercn — the authoritative realtime service.
 //!
 //! Architecture: `docs/architecture.md`
 //! Decisions:    `docs/adr/`
@@ -9,6 +9,7 @@ mod config;
 mod db;
 mod error;
 mod health;
+mod media;
 mod metrics;
 mod ratelimit;
 mod realtime;
@@ -52,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         public_url = %config.public_url,
         web_origin = %config.web_origin,
-        "starting youtube-room server"
+        "starting playercn server"
     );
 
     // --- Dependencies ------------------------------------------------------
@@ -67,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(5))
-        .user_agent(concat!("youtube-room/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("playercn/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("could not build HTTP client")?;
 
@@ -105,6 +106,9 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(renew_leases(Arc::clone(&hub), config.realtime.room_lease_renew));
     tokio::spawn(housekeeping(db.clone()));
+
+    // Closes rooms that have sat empty past the grace period.
+    rooms::lifecycle::spawn_sweeper(state.clone());
 
     // --- Serve -------------------------------------------------------------
     let app = routes::build(state);

@@ -1,7 +1,7 @@
-import type { ClientMessage } from '@youtube-room/protocol';
+import { type ClientMessage, positionAt } from '@playercn/protocol';
 import { useEffect } from 'react';
+import type { PlayerEngine } from '~/realtime/player/engine';
 import type { RoomSocket } from '~/realtime/socket';
-import type { PlayerSyncHandle } from '~/realtime/use-player-sync';
 import { usePermissions, useTimeline } from '~/stores/room-store';
 
 /**
@@ -23,7 +23,7 @@ export interface RoomShortcutActions {
   focusSearch: () => void;
   showPanel: (panel: 'chat' | 'queue' | 'people') => void;
   toggleHelp: () => void;
-  toggleMiniPlayer: () => void;
+  requestFullscreen: () => void;
 }
 
 type SyncAction = Extract<ClientMessage, { t: 'sync_intent' }>['action'];
@@ -41,12 +41,12 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 export function useRoomShortcuts({
   socket,
-  player,
+  engine,
   actions,
   enabled = true,
 }: {
   socket: RoomSocket | null;
-  player: PlayerSyncHandle;
+  engine: PlayerEngine | null;
   actions: RoomShortcutActions;
   enabled?: boolean;
 }): void {
@@ -63,7 +63,7 @@ export function useRoomShortcuts({
       if (isTypingTarget(event.target)) return;
 
       const canControl = permissions?.canControlPlayback ?? false;
-      const hasVideo = Boolean(timeline?.videoId);
+      const hasVideo = Boolean(timeline?.source);
 
       /**
        * Ask the server to move playback. Returns whether the request was
@@ -76,11 +76,13 @@ export function useRoomShortcuts({
         return true;
       };
 
-      const seekBy = (delta: number) =>
-        intent({
-          kind: 'seek',
-          position: Math.max(0, player.positionRef.current + delta),
-        });
+      const seekBy = (delta: number) => {
+        if (!timeline || !socket) return false;
+        // Relative to where the *room* is, not to where this player happens to
+        // be. A client mid-rebuffer would otherwise drag everyone back with it.
+        const from = positionAt(timeline, socket.clock.serverNow());
+        return intent({ kind: 'seek', position: Math.max(0, from + delta) });
+      };
 
       // `event.key` rather than `code`, so the bindings follow the user's
       // layout instead of assuming QWERTY.
@@ -88,7 +90,7 @@ export function useRoomShortcuts({
 
       // Digits scrub proportionally: 0 is the start, 9 is 90% in.
       if (key >= '0' && key <= '9' && !event.shiftKey) {
-        const duration = player.durationRef.current;
+        const duration = timeline?.duration ?? 0;
         if (duration > 0 && intent({ kind: 'seek', position: duration * (Number(key) / 10) })) {
           event.preventDefault();
         }
@@ -135,26 +137,12 @@ export function useRoomShortcuts({
         // are not part of the shared timeline, so they work for guests too.
         case 'm':
         case 'M':
-          player.setVolume(player.getVolume() > 0 ? 0 : 100);
+          engine?.setMuted(true);
           return;
 
         case 'f':
         case 'F':
-          player.requestFullscreen();
-          return;
-
-        case 'i':
-        case 'I':
-          actions.toggleMiniPlayer();
-          return;
-
-        case 'ArrowUp':
-          event.preventDefault();
-          player.setVolume(Math.min(100, player.getVolume() + 10));
-          return;
-        case 'ArrowDown':
-          event.preventDefault();
-          player.setVolume(Math.max(0, player.getVolume() - 10));
+          actions.requestFullscreen();
           return;
 
         // --- Panels --------------------------------------------------------
@@ -193,7 +181,7 @@ export function useRoomShortcuts({
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [enabled, socket, timeline, permissions, player, actions]);
+  }, [enabled, socket, timeline, permissions, engine, actions]);
 }
 
 /** The bindings, in the order the help overlay lists them. */
@@ -214,10 +202,8 @@ export const SHORTCUTS: ReadonlyArray<{
   {
     group: 'This browser',
     items: [
-      { keys: ['M'], label: 'Mute / unmute' },
-      { keys: ['↑', '↓'], label: 'Volume' },
+      { keys: ['M'], label: 'Mute' },
       { keys: ['F'], label: 'Fullscreen' },
-      { keys: ['I'], label: 'Mini player' },
     ],
   },
   {

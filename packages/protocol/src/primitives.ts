@@ -35,7 +35,7 @@ export const playbackRate = z.union(
   ],
 );
 
-export const roomRole = z.enum(['host', 'moderator', 'member', 'guest']);
+export const roomRole = z.enum(['host', 'cohost', 'member', 'guest']);
 export type RoomRole = z.infer<typeof roomRole>;
 
 export const roomVisibility = z.enum(['public', 'private', 'unlisted']);
@@ -69,6 +69,12 @@ export const permissions = z.object({
   canKick: z.boolean(),
   canModerateChat: z.boolean(),
   canEditRoom: z.boolean(),
+  canVoteSkip: z.boolean(),
+  canTransferHost: z.boolean(),
+  /** Promote a member to co-host, or demote one. Host-only. */
+  canManageRoles: z.boolean(),
+  canDesignateSuccessor: z.boolean(),
+  canSetRoomTheme: z.boolean(),
 });
 export type Permissions = z.infer<typeof permissions>;
 
@@ -96,13 +102,39 @@ export const participant = z.object({
 });
 export type Participant = z.infer<typeof participant>;
 
+/**
+ * How a source is played.
+ *
+ * The server decides this once, from the URL, so every client agrees on the
+ * playback strategy instead of re-sniffing the link. `youtube` goes through the
+ * IFrame API; `file` is a bare media element; `hls` and `dash` need Media
+ * Source Extensions.
+ */
+export const sourceKind = z.enum(['youtube', 'file', 'hls', 'dash']);
+export type SourceKind = z.infer<typeof sourceKind>;
+
+export const mediaSource = z.object({
+  kind: sourceKind,
+  url: z.url(),
+  /** Present for, and only for, `youtube`. */
+  videoId: videoId.nullable(),
+});
+export type MediaSource = z.infer<typeof mediaSource>;
+
+/** Live sources have no end to seek to, so the UI hides the scrubber. */
+export function mayBeLive(source: MediaSource): boolean {
+  return source.kind === 'hls' || source.kind === 'dash';
+}
+
 export const queueItem = z.object({
   id: uuid,
-  videoId,
+  source: mediaSource,
   title: z.string(),
   channelTitle: z.string(),
+  /** Zero when unknown — true for every file and stream until one plays. */
   durationSeconds: z.number().int().min(0),
-  thumbnailUrl: z.url(),
+  /** Empty for sources with no artwork, e.g. most playlist imports. */
+  thumbnailUrl: z.union([z.url(), z.literal('')]),
   addedBy: userSummary,
   addedAt: epochMs,
   /** Fractional index, so a reorder writes one row instead of renumbering. */
@@ -122,7 +154,18 @@ export const chatMessage = z.object({
   nonce: z.string().max(64).nullable(),
   mentions: z.array(uuid),
   /** Populated for system messages such as joins, skips and ownership changes. */
-  system: z.enum(['join', 'leave', 'skip', 'host_changed', 'video_changed']).nullable(),
+  system: z
+    .enum([
+      'join',
+      'leave',
+      'skip',
+      'host_changed',
+      'video_changed',
+      'role_changed',
+      'room_closing',
+      'settings_changed',
+    ])
+    .nullable(),
 });
 export type ChatMessage = z.infer<typeof chatMessage>;
 

@@ -206,6 +206,35 @@ impl Room {
             .get(&user_id)
             .map(|p| p.role)
     }
+
+    /// Everyone currently present, as succession candidates.
+    ///
+    /// Deliberately built from live presence rather than the membership table:
+    /// a room can only be inherited by someone who is actually in it, and the
+    /// membership table is full of people who left hours ago.
+    pub async fn succession_candidates(&self) -> Vec<crate::rooms::lifecycle::Candidate> {
+        self.state
+            .lock()
+            .await
+            .participants
+            .values()
+            .map(|p| crate::rooms::lifecycle::Candidate {
+                user_id: p.user.id,
+                role: p.role,
+                joined_at: p.joined_at,
+            })
+            .collect()
+    }
+
+    /// Update a participant's role in the live set, returning the new
+    /// protocol view so the caller can broadcast it.
+    pub async fn set_role_local(&self, user_id: Uuid, role: Role) -> Option<Participant> {
+        let mut state = self.state.lock().await;
+        state.participants.get_mut(&user_id).map(|participant| {
+            participant.role = role;
+            participant.to_protocol()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +264,8 @@ mod tests {
                 visibility: "public".into(),
                 category: "general".into(),
                 host_id: Uuid::nil(),
+                owner_id: None,
+                successor_id: None,
                 created_at: 0,
                 max_participants: 25,
                 settings: RoomSettings::default(),
@@ -272,8 +303,8 @@ mod tests {
     async fn reconnecting_picks_up_the_current_role() {
         let room = room();
         room.attach(user(1), Role::Member).await;
-        room.attach(user(1), Role::Moderator).await;
-        assert_eq!(room.role_of(user(1).id).await, Some(Role::Moderator));
+        room.attach(user(1), Role::Cohost).await;
+        assert_eq!(room.role_of(user(1).id).await, Some(Role::Cohost));
     }
 
     #[tokio::test]

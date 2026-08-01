@@ -1,335 +1,215 @@
-/**
- * biome-ignore-all lint/complexity/noImportantStyles: the reduced-motion block
- * at the bottom must beat every animation declaration in the sheet, including
- * Tailwind utilities. `!important` is the canonical implementation of that
- * override and the only use of it in this file.
- */
+
 @import "tailwindcss";
+@import "tw-animate-css";
+/*@import "shadcn/"*/
+@import "./themes.css";
 
-/* ---------------------------------------------------------------------------
-   Design tokens
-   ---------------------------------------------------------------------------
-   Tailwind v4 keeps configuration in CSS, which is what makes room themes and
-   dark mode a *runtime token swap* rather than a rebuild (ADR 0009).
+@custom-variant dark (&:is(.dark *));
 
-   The palette is deliberately not a generic dashboard grey. It is built around
-   a near-black canvas with a single violet-to-cyan accent axis, so colour reads
-   as signal — the play state, the speaking indicator, the host badge — and
-   never as decoration.
---------------------------------------------------------------------------- */
-
-@theme {
-  /* Canvas — cool near-blacks rather than pure #000, which crushes on OLED
-     and makes glass surfaces impossible to distinguish. */
-  --color-canvas-950: oklch(0.145 0.012 275);
-  --color-canvas-900: oklch(0.178 0.014 275);
-  --color-canvas-850: oklch(0.205 0.015 275);
-  --color-canvas-800: oklch(0.238 0.016 275);
-  --color-canvas-700: oklch(0.305 0.017 275);
-  --color-canvas-600: oklch(0.402 0.018 275);
-  --color-canvas-500: oklch(0.524 0.017 275);
-  --color-canvas-400: oklch(0.652 0.015 275);
-  --color-canvas-300: oklch(0.775 0.012 275);
-  --color-canvas-200: oklch(0.872 0.008 275);
-  --color-canvas-100: oklch(0.936 0.005 275);
-  --color-canvas-50: oklch(0.978 0.003 275);
-
-  /* Accent — violet primary, cyan secondary. The gradient between them is the
-     product's signature and is used sparingly. */
-  --color-accent-400: oklch(0.782 0.152 295);
-  --color-accent-500: oklch(0.688 0.196 295);
-  --color-accent-600: oklch(0.598 0.212 295);
-  --color-accent-700: oklch(0.512 0.192 295);
-
-  --color-cyan-400: oklch(0.812 0.132 205);
-  --color-cyan-500: oklch(0.724 0.148 205);
-
-  /* Semantic */
-  --color-success-500: oklch(0.735 0.168 152);
-  --color-warning-500: oklch(0.795 0.152 78);
-  --color-danger-500: oklch(0.648 0.208 22);
-  --color-live-500: oklch(0.672 0.222 18);
-
-  /* Typography — a variable grotesque for UI, tabular figures for timestamps.
-     Loaded from the system stack first so first paint never waits on a font. */
-  --font-sans:
-    "InterVariable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-
-  --text-2xs: 0.6875rem;
-  --text-2xs--line-height: 1rem;
-
-  /* Radii — generous but not pill-shaped; the product should read as software,
-     not as a toy. */
-  --radius-xs: 0.375rem;
-  --radius-sm: 0.5rem;
-  --radius-md: 0.75rem;
-  --radius-lg: 1rem;
-  --radius-xl: 1.25rem;
-  --radius-2xl: 1.75rem;
-
-  /* Elevation. Soft, wide, low-opacity — a single hard shadow reads cheap. */
-  --shadow-glow:
-    0 0 0 1px oklch(0.688 0.196 295 / 0.25), 0 8px 32px -8px oklch(0.688 0.196 295 / 0.35);
-  --shadow-panel: 0 1px 0 0 oklch(1 0 0 / 0.04) inset, 0 12px 40px -12px oklch(0 0 0 / 0.6);
-  --shadow-lift: 0 2px 4px -2px oklch(0 0 0 / 0.3), 0 16px 48px -16px oklch(0 0 0 / 0.55);
-
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-/* ---------------------------------------------------------------------------
-   Themes
-   ---------------------------------------------------------------------------
-   Semantic surface variables indirect through the palette so a room theme can
-   remap them without touching a single component.
---------------------------------------------------------------------------- */
-
+/*
+ * The default palette.
+ *
+ * Every other theme in themes.css overrides a subset of these variables under a
+ * `[data-theme="…"]` selector, so anything a theme does not restate falls back
+ * to here. That is what keeps twelve themes to a few hundred lines rather than
+ * twelve full copies of this block.
+ */
 :root {
-  color-scheme: dark;
-
-  --surface-base: var(--color-canvas-950);
-  --surface-raised: var(--color-canvas-900);
-  --surface-overlay: var(--color-canvas-850);
-  --surface-hover: var(--color-canvas-800);
-
-  --border-subtle: oklch(1 0 0 / 0.07);
-  --border-default: oklch(1 0 0 / 0.11);
-  --border-strong: oklch(1 0 0 / 0.18);
-
-  --text-primary: var(--color-canvas-50);
-  --text-secondary: var(--color-canvas-300);
-  --text-muted: var(--color-canvas-500);
-
-  --glass-bg: oklch(0.205 0.015 275 / 0.72);
-  --glass-border: oklch(1 0 0 / 0.09);
-
-  --accent: var(--color-accent-500);
-  --accent-contrast: oklch(0.99 0 0);
-
-  /* Ambient hue used by the animated backdrop; room themes override it. */
-  --ambient-a: oklch(0.688 0.196 295 / 0.22);
-  --ambient-b: oklch(0.724 0.148 205 / 0.16);
+  --background: oklch(0.99 0 0);
+  --foreground: oklch(0 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0 0 0);
+  --popover: oklch(0.99 0 0);
+  --popover-foreground: oklch(0 0 0);
+  --primary: oklch(0 0 0);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.94 0 0);
+  --secondary-foreground: oklch(0 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.44 0 0);
+  --accent: oklch(0.94 0 0);
+  --accent-foreground: oklch(0 0 0);
+  --destructive: oklch(0.63 0.19 23.03);
+  --destructive-foreground: oklch(1 0 0);
+  --border: oklch(0.92 0 0);
+  --input: oklch(0.94 0 0);
+  --ring: oklch(0 0 0);
+  --chart-1: oklch(0.81 0.17 75.35);
+  --chart-2: oklch(0.55 0.22 264.53);
+  --chart-3: oklch(0.72 0 0);
+  --chart-4: oklch(0.92 0 0);
+  --chart-5: oklch(0.56 0 0);
+  --sidebar: oklch(0.99 0 0);
+  --sidebar-foreground: oklch(0 0 0);
+  --sidebar-primary: oklch(0 0 0);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.94 0 0);
+  --sidebar-accent-foreground: oklch(0 0 0);
+  --sidebar-border: oklch(0.94 0 0);
+  --sidebar-ring: oklch(0 0 0);
+  --font-sans: "Geist Variable", Geist, ui-sans-serif, system-ui, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, monospace;
+  --radius: 0.5rem;
+  --shadow-x: 0px;
+  --shadow-y: 1px;
+  --shadow-blur: 2px;
+  --shadow-spread: 0px;
+  --shadow-opacity: 0.18;
+  --shadow-color: hsl(0 0% 0%);
+  --shadow-2xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.09);
+  --shadow-xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.09);
+  --shadow-sm: 0px 1px 2px 0px hsl(0 0% 0% / 0.18), 0px 1px 2px -1px hsl(0 0% 0% / 0.18);
+  --shadow: 0px 1px 2px 0px hsl(0 0% 0% / 0.18), 0px 1px 2px -1px hsl(0 0% 0% / 0.18);
+  --shadow-md: 0px 1px 2px 0px hsl(0 0% 0% / 0.18), 0px 2px 4px -1px hsl(0 0% 0% / 0.18);
+  --shadow-lg: 0px 1px 2px 0px hsl(0 0% 0% / 0.18), 0px 4px 6px -1px hsl(0 0% 0% / 0.18);
+  --shadow-xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.18), 0px 8px 10px -1px hsl(0 0% 0% / 0.18);
+  --shadow-2xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.45);
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
 }
 
-:root[data-theme="light"] {
-  color-scheme: light;
-
-  --surface-base: var(--color-canvas-50);
-  --surface-raised: oklch(1 0 0);
-  --surface-overlay: oklch(1 0 0);
-  --surface-hover: var(--color-canvas-100);
-
-  --border-subtle: oklch(0 0 0 / 0.06);
-  --border-default: oklch(0 0 0 / 0.1);
-  --border-strong: oklch(0 0 0 / 0.16);
-
-  --text-primary: var(--color-canvas-950);
-  --text-secondary: var(--color-canvas-700);
-  --text-muted: var(--color-canvas-500);
-
-  --glass-bg: oklch(1 0 0 / 0.78);
-  --glass-border: oklch(0 0 0 / 0.08);
-
-  --ambient-a: oklch(0.688 0.196 295 / 0.14);
-  --ambient-b: oklch(0.724 0.148 205 / 0.1);
+.dark {
+  --background: oklch(0 0 0);
+  --foreground: oklch(1 0 0);
+  --card: oklch(0.14 0 0);
+  --card-foreground: oklch(1 0 0);
+  --popover: oklch(0.18 0 0);
+  --popover-foreground: oklch(1 0 0);
+  --primary: oklch(1 0 0);
+  --primary-foreground: oklch(0 0 0);
+  --secondary: oklch(0.25 0 0);
+  --secondary-foreground: oklch(1 0 0);
+  --muted: oklch(0.23 0 0);
+  --muted-foreground: oklch(0.72 0 0);
+  --accent: oklch(0.32 0 0);
+  --accent-foreground: oklch(1 0 0);
+  --destructive: oklch(0.69 0.2 23.91);
+  --destructive-foreground: oklch(0 0 0);
+  --border: oklch(0.26 0 0);
+  --input: oklch(0.32 0 0);
+  --ring: oklch(0.72 0 0);
+  --chart-1: oklch(0.81 0.17 75.35);
+  --chart-2: oklch(0.58 0.21 260.84);
+  --chart-3: oklch(0.56 0 0);
+  --chart-4: oklch(0.44 0 0);
+  --chart-5: oklch(0.92 0 0);
+  --sidebar: oklch(0.18 0 0);
+  --sidebar-foreground: oklch(1 0 0);
+  --sidebar-primary: oklch(1 0 0);
+  --sidebar-primary-foreground: oklch(0 0 0);
+  --sidebar-accent: oklch(0.32 0 0);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-border: oklch(0.32 0 0);
+  --sidebar-ring: oklch(0.72 0 0);
 }
 
-/* Room themes. Each remaps only the accent axis and ambient wash, so the
-   information hierarchy stays identical across every theme. */
-:root[data-room-theme="sunset"] {
-  --accent: oklch(0.712 0.186 38);
-  --ambient-a: oklch(0.712 0.186 38 / 0.22);
-  --ambient-b: oklch(0.756 0.162 12 / 0.16);
-}
-:root[data-room-theme="forest"] {
-  --accent: oklch(0.702 0.152 158);
-  --ambient-a: oklch(0.702 0.152 158 / 0.2);
-  --ambient-b: oklch(0.762 0.128 185 / 0.14);
-}
-:root[data-room-theme="mono"] {
-  --accent: oklch(0.86 0 0);
-  --ambient-a: oklch(0.7 0 0 / 0.12);
-  --ambient-b: oklch(0.5 0 0 / 0.1);
-}
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
 
-/* ---------------------------------------------------------------------------
-   Base
---------------------------------------------------------------------------- */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --shadow-2xs: var(--shadow-2xs);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow: var(--shadow);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
+}
 
 @layer base {
   * {
-    border-color: var(--border-subtle);
-  }
-
-  html {
-    -webkit-text-size-adjust: 100%;
-    scrollbar-gutter: stable;
+    @apply border-border outline-ring/50;
   }
 
   body {
-    background-color: var(--surface-base);
-    color: var(--text-primary);
-    font-family: var(--font-sans);
-    font-feature-settings: "cv02", "cv03", "cv04", "ss01";
-    -webkit-font-smoothing: antialiased;
+    @apply bg-background text-foreground;
+    font-synthesis-weight: none;
     text-rendering: optimizeLegibility;
-    overscroll-behavior-y: none;
   }
 
-  /* Timestamps, counters and drift readouts must not reflow as digits change. */
-  time,
+  /*
+   * Swapping theme repaints the whole page. Without suppressing transitions for
+   * the duration, every coloured element animates on its own schedule and the
+   * change reads as a smear rather than a switch. Added around the swap and
+   * removed on the next frame — see theme-provider.tsx.
+   */
+  .theme-transition,
+  .theme-transition *,
+  .theme-transition *::before,
+  .theme-transition *::after {
+    transition: none !important;
+  }
+}
+
+@layer utilities {
+  /*
+   * Tabular figures wherever a number changes in place — timers, counts, drift
+   * readouts — so the layout does not jitter on every tick.
+   */
   [data-numeric] {
     font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
   }
 
-  /* A visible, on-brand focus ring — never `outline: none` without a
-     replacement. Only shown for keyboard users. */
-  :focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-    border-radius: var(--radius-xs);
+  /* Hide the scrollbar without losing the ability to scroll. */
+  .no-scrollbar {
+    scrollbar-width: none;
   }
-
-  ::selection {
-    background: oklch(0.688 0.196 295 / 0.35);
-    color: var(--text-primary);
-  }
-
-  ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 999px;
-    border: 3px solid transparent;
-    background-clip: content-box;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: var(--border-strong);
-    background-clip: content-box;
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
   }
 }
 
-/* ---------------------------------------------------------------------------
-   Utilities
---------------------------------------------------------------------------- */
-
-@utility glass {
-  background: var(--glass-bg);
-  backdrop-filter: blur(20px) saturate(1.6);
-  -webkit-backdrop-filter: blur(20px) saturate(1.6);
-  border: 1px solid var(--glass-border);
-}
-
-@utility panel {
-  background: var(--surface-raised);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-panel);
-}
-
-/* Gradient text for headline accents. Falls back to solid colour where
-   background-clip is unsupported. */
-@utility text-gradient {
-  background-image: linear-gradient(
-    100deg,
-    var(--color-canvas-50) 0%,
-    var(--color-accent-400) 55%,
-    var(--color-cyan-400) 100%
-  );
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-}
-
-/* Hairline gradient border, used on primary CTAs and the active room card. */
-@utility ring-gradient {
-  position: relative;
-  isolation: isolate;
-}
-
-/* ---------------------------------------------------------------------------
-   Motion
-   ---------------------------------------------------------------------------
-   Every animation is opt-out by default. Decorative motion (ambient wash,
-   reaction bursts, confetti) is removed entirely; functional motion collapses
-   to an instant state change rather than disappearing, so nothing becomes
-   unusable (ADR 0009).
---------------------------------------------------------------------------- */
-
-@keyframes ambient-drift {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(2%, -3%, 0) scale(1.08);
-  }
-}
-
-@keyframes speaking-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 oklch(0.735 0.168 152 / 0.55);
-  }
-  50% {
-    box-shadow: 0 0 0 6px oklch(0.735 0.168 152 / 0);
-  }
-}
-
-@keyframes shimmer {
-  100% {
-    transform: translateX(100%);
-  }
-}
-
-@keyframes rise-fade {
-  0% {
-    opacity: 0;
-    transform: translateY(0) scale(0.8);
-  }
-  15% {
-    opacity: 1;
-    transform: translateY(-8px) scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(-120px) scale(1.1);
-  }
-}
-
-.animate-ambient {
-  animation: ambient-drift 18s var(--ease-out-expo) infinite;
-}
-.animate-speaking {
-  animation: speaking-pulse 1.4s ease-out infinite;
-}
-.animate-reaction {
-  animation: rise-fade 2.2s var(--ease-out-expo) forwards;
-}
-
-/* Skeleton shimmer for loading states. */
-.skeleton {
-  position: relative;
-  overflow: hidden;
-  background: var(--surface-hover);
-}
-.skeleton::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, oklch(1 0 0 / 0.06), transparent);
-  animation: shimmer 1.6s infinite;
-}
-
+/*
+ * Respect the operating-system preference over everything above. This has to
+ * come last and win outright: a decorative animation that survives here is one
+ * a user has explicitly told us makes them unwell.
+ */
 @media (prefers-reduced-motion: reduce) {
+  /* A universal reset is the intent: it has to reach every element and
+     pseudo-element, and the ordering complaint does not apply to a block that
+     already wins on !important. */
   *,
   *::before,
   *::after {
@@ -337,12 +217,5 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
-  }
-
-  /* Purely decorative layers are removed rather than merely stilled. */
-  .animate-ambient,
-  .animate-reaction,
-  .skeleton::after {
-    display: none;
   }
 }

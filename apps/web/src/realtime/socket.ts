@@ -1,8 +1,4 @@
-import {
-  type ClientMessage,
-  type ServerMessage,
-  serverMessageSchema,
-} from '@youtube-room/protocol';
+import { type ClientMessage, type ServerMessage, serverMessageSchema } from '@playercn/protocol';
 import { api } from '~/lib/api';
 import { backoffDelay } from '~/lib/utils';
 import { ClockEstimator, monotonicNow, startProbing } from './clock';
@@ -85,9 +81,13 @@ export class RoomSocket {
       return;
     }
 
+    // Next's rewrites proxy HTTP but not WebSocket upgrades, so in development
+    // this must point at the API origin directly rather than relying on the
+    // same-origin proxy that `/api` uses. In production the reverse proxy
+    // terminates both on one origin and the fallback is correct.
     const url = new URL(
       `/ws/rooms/${this.#roomId}`,
-      import.meta.env.PUBLIC_WS_URL ?? window.location.origin,
+      process.env.NEXT_PUBLIC_WS_URL ?? window.location.origin,
     );
     url.protocol = url.protocol.replace('http', 'ws');
 

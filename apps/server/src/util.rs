@@ -127,6 +127,47 @@ pub fn needs_rebalance(before: f64, after: f64) -> bool {
 }
 
 /// Extract a video id from anything a user is likely to paste.
+/// Best-effort human title for a source we have no metadata for.
+///
+/// A file or stream URL is all we get for non-YouTube sources, so the filename
+/// stands in for a title. Percent-escapes are decoded and separators softened,
+/// because `My%20Film_2024.mp4` is not what anyone wants to read in a queue.
+pub fn title_from_url(url: &str) -> String {
+    let filename = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(|mut segments| segments.next_back())
+                .filter(|segment| !segment.is_empty())
+                .map(|segment| segment.to_owned())
+        })
+        .unwrap_or_default();
+
+    if filename.is_empty() {
+        // No path to work with — the host is the only identifying thing left.
+        return reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(|host| host.to_owned()))
+            .unwrap_or_else(|| "Untitled".to_string());
+    }
+
+    let decoded = urlencoding::decode(&filename)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or(filename);
+
+    // Drop the extension; it is noise once the source kind is displayed.
+    let stem = decoded.rsplit_once('.').map_or(decoded.as_str(), |(stem, _)| stem);
+
+    let cleaned = stem.replace(['_', '+'], " ").trim().to_string();
+
+    if cleaned.is_empty() {
+        "Untitled".to_string()
+    } else {
+        cleaned.chars().take(200).collect()
+    }
+}
+
 pub fn parse_video_id(input: &str) -> Option<String> {
     let trimmed = input.trim();
 

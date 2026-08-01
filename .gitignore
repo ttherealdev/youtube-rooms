@@ -21,3 +21,7 @@ keys/
 coverage/
 playwright-report/
 test-results/
+
+# Next.js
+.next/
+next-env.d.ts

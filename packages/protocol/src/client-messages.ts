@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { chatBody, playbackRate, seconds, uuid, videoId } from './primitives.ts';
+import { chatBody, playbackRate, seconds, uuid } from './primitives.ts';
 
 /**
  * Messages the browser sends. Every one of these is an *intent* — the server
@@ -45,11 +45,33 @@ const syncReport = z.object({
   buffering: z.boolean(),
 });
 
+/**
+ * Add one source. `url` is whatever the user pasted — a YouTube link or bare
+ * id, a direct media URL, or a stream manifest — and the server classifies it.
+ */
 const queueAdd = z.object({
   t: z.literal('queue_add'),
-  videoId,
+  url: z.string().min(1).max(2048),
   /** Insert next rather than at the tail. Requires queue permission. */
   playNext: z.boolean().default(false),
+});
+
+/** Expand an M3U/PLS playlist URL and append every entry on it. */
+const queueImport = z.object({
+  t: z.literal('queue_import'),
+  url: z.url().max(2048),
+});
+
+/**
+ * Report a duration the player discovered.
+ *
+ * Only the first report for a given source is applied, and only from someone
+ * who can control playback — the duration bounds seeks and decides when the
+ * room auto-advances.
+ */
+const reportDuration = z.object({
+  t: z.literal('report_duration'),
+  seconds: z.number().positive().finite(),
 });
 
 const queueRemove = z.object({ t: z.literal('queue_remove'), itemId: uuid });
@@ -112,9 +134,21 @@ const kickParticipant = z.object({ t: z.literal('kick_participant'), userId: uui
 const setRole = z.object({
   t: z.literal('set_role'),
   userId: uuid,
-  role: z.enum(['moderator', 'member']),
+  /** Host is never granted here — that is an explicit transfer. */
+  role: z.enum(['cohost', 'member']),
 });
 const transferHost = z.object({ t: z.literal('transfer_host'), userId: uuid });
+
+/**
+ * Nominate who inherits the room when the host leaves; `null` clears it.
+ *
+ * Advisory: consulted at handover time, and ignored if that person is no
+ * longer in the room.
+ */
+const designateSuccessor = z.object({
+  t: z.literal('designate_successor'),
+  userId: uuid.nullable(),
+});
 
 export const clientMessage = z.discriminatedUnion('t', [
   authenticate,
@@ -122,6 +156,8 @@ export const clientMessage = z.discriminatedUnion('t', [
   syncIntent,
   syncReport,
   queueAdd,
+  queueImport,
+  reportDuration,
   queueRemove,
   queueMove,
   queueClear,
@@ -139,6 +175,7 @@ export const clientMessage = z.discriminatedUnion('t', [
   kickParticipant,
   setRole,
   transferHost,
+  designateSuccessor,
 ]);
 
 export type ClientMessage = z.infer<typeof clientMessage>;

@@ -137,6 +137,34 @@ async fn serve(socket: WebSocket, state: AppState, room_id: Uuid) -> anyhow::Res
         return Ok(());
     }
 
+    // The creator is back. Reclaiming here — before the session exists — means
+    // the snapshot they are about to receive already shows them as host, rather
+    // than showing them as a member and correcting itself a moment later.
+    let reclaimed = crate::rooms::lifecycle::should_reclaim(
+        room_record.owner_id,
+        room_record.host_id,
+        user.id,
+    );
+
+    let role = if reclaimed {
+        // Not permanent: this is the creator taking back custody, and their
+        // ownership was never in question.
+        db::rooms::transfer_host(&state.db, room_id, room_record.host_id, user.id, false).await?;
+
+        let mut info = room.info.write().await;
+        info.host_id = user.id;
+        info.successor_id = None;
+        drop(info);
+
+        // Whoever was holding the room keeps co-host rather than being dropped
+        // to member: they were trusted with the whole room a moment ago.
+        room.set_role_local(room_record.host_id, Role::Cohost).await;
+
+        Role::Host
+    } else {
+        role
+    };
+
     let permissions = permissions::resolve(role, &room_record.settings.0);
 
     // --- Pumps -------------------------------------------------------------
@@ -228,6 +256,19 @@ async fn serve(socket: WebSocket, state: AppState, room_id: Uuid) -> anyhow::Res
         }
     }
 
+    if reclaimed {
+        announce_host_change(
+            &state,
+            &room,
+            &format!("{} is hosting again.", summary.display_name),
+        )
+        .await;
+    }
+
+    // Anyone present cancels the empty-room clock, so a room that briefly
+    // emptied is not swept out from under the person who just walked in.
+    let _ = db::rooms::set_emptiness(&state.db, room_id, false).await;
+
     {
         let mut redis = state.redis.clone();
         touch_presence(&mut redis, room_id, user.id).await;
@@ -302,14 +343,103 @@ async fn serve(socket: WebSocket, state: AppState, room_id: Uuid) -> anyhow::Res
                 &ServerMessage::VoicePeerLeft { user_id: user.id },
             )
             .await;
+
+        // A room without a host cannot be moderated, skipped or reconfigured
+        // by anyone, so the moment the host's last tab closes someone still
+        // present inherits it.
+        if room.info.read().await.host_id == user.id {
+            promote_after_departure(&state, &room, user.id).await;
+        }
     }
 
     let remaining = room.participant_count().await as i32;
     let _ = db::rooms::touch_activity(&state.db, room_id, remaining).await;
+    // Starts the grace period. The sweep, not this line, is what closes the
+    // room — a host who refreshes must find their room still standing.
+    let _ = db::rooms::set_emptiness(&state.db, room_id, remaining == 0).await;
     let _ = db::users::touch_last_seen(&state.db, user.id).await;
 
     state.hub.release(room_id).await;
     Ok(())
+}
+
+/// Hand the room to whoever is left after the host disconnects.
+///
+/// Failures are logged rather than propagated: this runs during teardown, and
+/// a socket that is already closing has nowhere to report an error to. The
+/// worst case is a room whose host row is stale until the next join, which the
+/// reclaim path then corrects.
+async fn promote_after_departure(state: &AppState, room: &Arc<Room>, departing: Uuid) {
+    let nominated = room.info.read().await.successor_id;
+    let candidates = room.succession_candidates().await;
+
+    let Some(next) = crate::rooms::lifecycle::choose_successor(&candidates, departing, nominated)
+    else {
+        // Nobody left. The empty-room clock started by the caller takes over.
+        return;
+    };
+
+    if let Err(error) =
+        db::rooms::transfer_host(&state.db, room.id, departing, next, false).await
+    {
+        tracing::error!(?error, room = %room.id, "failed to promote a new host");
+        return;
+    }
+
+    {
+        let mut info = room.info.write().await;
+        info.host_id = next;
+        info.successor_id = None;
+    }
+
+    let promoted = room.set_role_local(next, Role::Host).await;
+    let name = promoted
+        .as_ref()
+        .map(|p| p.user.display_name.clone())
+        .unwrap_or_else(|| "Someone".to_string());
+
+    db::history::audit(
+        &state.db,
+        Some(departing),
+        Some(room.id),
+        "room.host_auto_transferred",
+        serde_json::json!({ "to": next, "nominated": nominated }),
+    )
+    .await;
+
+    if let Some(participant) = promoted {
+        state
+            .hub
+            .broadcast(room, &ServerMessage::ParticipantUpdated { participant })
+            .await;
+    }
+
+    announce_host_change(state, room, &format!("{name} is now hosting.")).await;
+}
+
+/// Broadcast a host change and record it in the room's own history.
+///
+/// The room snapshot carries `hostId`, so clients recompute their own
+/// permissions from it; the chat line is what makes the change legible to
+/// people who were not watching the participant list.
+async fn announce_host_change(state: &AppState, room: &Arc<Room>, message: &str) {
+    let snapshot = room.info.read().await.clone();
+
+    state
+        .hub
+        .broadcast(room, &ServerMessage::RoomUpdated { room: snapshot })
+        .await;
+
+    for participant in room.snapshot_participants().await {
+        state
+            .hub
+            .broadcast(room, &ServerMessage::ParticipantUpdated { participant })
+            .await;
+    }
+
+    db::chat::insert_system(&state.db, room.id, "host_changed", message)
+        .await
+        .ok();
 }
 
 /// Read frames until the `authenticate` message arrives.

@@ -122,6 +122,11 @@ pub struct RealtimeConfig {
     /// How long a node's claim on a room survives without renewal.
     pub room_lease_ttl: Duration,
     pub room_lease_renew: Duration,
+    /// How long a room may sit empty before it is closed. This is what makes
+    /// "delete the room when everyone leaves" survive a page refresh.
+    pub empty_room_grace: Duration,
+    /// How often the sweep looks for rooms past that grace period.
+    pub empty_room_sweep: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +146,14 @@ pub struct LimitsConfig {
     pub reactions_per_minute: u32,
     pub rooms_per_hour: u32,
     pub http_per_minute: u32,
+    /// Playlist imports are metered separately and far more tightly: one
+    /// request makes the server fetch a third-party URL and can append
+    /// hundreds of rows, so it is nothing like a single queue add.
+    pub imports_per_minute: u32,
+    /// Hard ceiling on a fetched playlist body. Public IPTV lists are a few
+    /// hundred kilobytes; anything far past that is not a playlist.
+    pub playlist_max_bytes: usize,
+    pub playlist_timeout: std::time::Duration,
 }
 
 impl Config {
@@ -215,6 +228,8 @@ impl Config {
                 send_buffer: parse_opt("WS_SEND_BUFFER")?.unwrap_or(256),
                 room_lease_ttl: secs(parse_opt("ROOM_LEASE_TTL_SECS")?.unwrap_or(30)),
                 room_lease_renew: secs(parse_opt("ROOM_LEASE_RENEW_SECS")?.unwrap_or(10)),
+                empty_room_grace: secs(parse_opt("EMPTY_ROOM_GRACE_SECS")?.unwrap_or(60)),
+                empty_room_sweep: secs(parse_opt("EMPTY_ROOM_SWEEP_SECS")?.unwrap_or(30)),
             },
 
             voice: VoiceConfig {
@@ -237,6 +252,11 @@ impl Config {
                 reactions_per_minute: parse_opt("RL_REACTION_PER_MIN")?.unwrap_or(40),
                 rooms_per_hour: parse_opt("RL_ROOMS_PER_HOUR")?.unwrap_or(10),
                 http_per_minute: parse_opt("RL_HTTP_PER_MIN")?.unwrap_or(300),
+                imports_per_minute: parse_opt("RL_IMPORTS_PER_MIN")?.unwrap_or(3),
+                playlist_max_bytes: parse_opt("PLAYLIST_MAX_BYTES")?.unwrap_or(4 * 1024 * 1024),
+                playlist_timeout: std::time::Duration::from_secs(
+                    parse_opt("PLAYLIST_TIMEOUT_SECS")?.unwrap_or(10),
+                ),
             },
         };
 
@@ -477,6 +497,8 @@ mod tests {
                 send_buffer: 256,
                 room_lease_ttl: secs(30),
                 room_lease_renew: secs(10),
+                empty_room_grace: secs(60),
+                empty_room_sweep: secs(30),
             },
             voice: VoiceConfig {
                 mesh_max_peers: 8,
@@ -492,6 +514,9 @@ mod tests {
                 reactions_per_minute: 40,
                 rooms_per_hour: 10,
                 http_per_minute: 300,
+                imports_per_minute: 3,
+                playlist_max_bytes: 4 * 1024 * 1024,
+                playlist_timeout: std::time::Duration::from_secs(10),
             },
         }
     }

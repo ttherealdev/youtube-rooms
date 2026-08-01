@@ -1,17 +1,19 @@
 <div align="center">
 
-# YouTube Room
+# playercn
 
-**Watch YouTube together, actually in sync.**
+**Watch anything together, actually in sync.**
 
-Create a room, share one link, and everyone lands on the same frame — with
-voice chat, a shared queue and live chat. No account needed to join.
+Create a room, share one link, and everyone lands on the same frame — YouTube,
+direct video and audio files, HLS and DASH streams, and whole M3U/PLS
+playlists. With voice chat, a shared queue and live chat. No account needed to
+join.
 
 <br />
 
 ![Status](https://img.shields.io/badge/status-pre--release-f59e0b?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-6366f1?style=flat-square)
-![Rust tests](https://img.shields.io/badge/rust%20tests-118%20passing-22c55e?style=flat-square)
+![Rust tests](https://img.shields.io/badge/rust%20tests-186%20passing-22c55e?style=flat-square)
 ![TS tests](https://img.shields.io/badge/protocol%20tests-15%20passing-22c55e?style=flat-square)
 
 ![Rust](https://img.shields.io/badge/Rust-1.97-000000?style=flat-square&logo=rust&logoColor=white)
@@ -22,9 +24,9 @@ voice chat, a shared queue and live chat. No account needed to join.
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-7.0-3178c6?style=flat-square&logo=typescript&logoColor=white)
 ![React](https://img.shields.io/badge/React-19.2-087ea4?style=flat-square&logo=react&logoColor=white)
-![TanStack Start](https://img.shields.io/badge/TanStack%20Start-1.168-ff4154?style=flat-square&logo=reactquery&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-16.2-000000?style=flat-square&logo=nextdotjs&logoColor=white)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind-4.3-38bdf8?style=flat-square&logo=tailwindcss&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-8.1-646cff?style=flat-square&logo=vite&logoColor=white)
+![shadcn/ui](https://img.shields.io/badge/shadcn%2Fui-base--nova-000000?style=flat-square)
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ed?style=flat-square&logo=docker&logoColor=white)
 
 </div>
@@ -50,7 +52,7 @@ If you read one section, read [How synchronisation works](#how-synchronisation-w
 **Prerequisites:** Rust 1.90+, Node 22+, pnpm 11+, Docker.
 
 ```bash
-git clone <repo> youtube-room && cd youtube-room
+git clone <repo> playercn && cd playercn
 
 pnpm install
 ./scripts/gen-keys.sh          # Ed25519 keypair for signing access tokens
@@ -69,8 +71,8 @@ and video search need API credentials (both optional — see `.env.example`).
 ```mermaid
 graph TB
     subgraph Browser
-        UI[React 19 · TanStack Start]
-        YT[YouTube IFrame player]
+        UI[React 19 · Next.js 16 App Router]
+        YT[YouTube IFrame · video · hls.js · dash.js]
         RTC[WebRTC peers]
     end
 
@@ -110,19 +112,20 @@ and the security posture — lives in
 
 | Layer | Choice | Reasoning | Runner-up |
 | --- | --- | --- | --- |
-| Frontend | TanStack Start · React 19 | Real client-side router with nested layouts, so the socket and mini-player survive navigation. SSR + prerender keeps the landing page fast. | Astro |
+| Frontend | Next.js 16 App Router · React 19 | Real nested layouts, so the socket survives navigation, plus server components for the marketing surface. | TanStack Start |
 | Backend | Rust · Axum · Tokio | No GC pause inside the tail latency of a sync correction. `enum` + exhaustive `match` makes an unhandled protocol variant a compile error. | Go |
 | Database | PostgreSQL 17 · SQLx | Real concurrent writers, row locking for queue reorders, `jsonb` settings, partial indexes on the directory. We write SQL; no ORM. | SeaORM |
 | Realtime | WebSocket, one per client | Universal proxy support, ordered and reliable. Multiplexes every concern over one connection. | WebTransport |
 | Voice | Mesh WebRTC behind a port | One hop, no relay, no media egress cost, best privacy. Swappable for an SFU. | LiveKit |
 | Auth | Custom OAuth + split-token JWT | The authority is Rust; a Node auth library would put session semantics in the layer that isn't the source of truth. | Better Auth |
 | Client state | Zustand + TanStack Query | Socket messages arrive outside React and must write to a store imperatively — Zustand's `setState` is first-class for that. | Jotai |
-| Styling | Tailwind 4 · Radix · Lucide | v4 keeps tokens in CSS, which makes room themes and dark mode a runtime swap rather than a rebuild. | Panda CSS |
+| Styling | Tailwind 4 · shadcn/ui (Base UI) · Lucide | v4 keeps tokens in CSS, which is what makes twelve themes and per-room appearance a runtime attribute swap rather than a rebuild. | Panda CSS |
+| Playback | Engine per source kind behind one interface | The drift-correction loop is written once against `PlayerEngine`; supporting a new format is a new adapter, not a change to sync. | One player per page |
 | Scaling | Redis leases, no sticky sessions | Exactly one node owns a room's timeline; any node can serve its sockets. | Sticky LB |
 
 ### Decisions that deviate from the original brief
 
-**TanStack Start instead of Astro.** Astro is genuinely the better tool for the
+**Next.js instead of Astro.** Astro is genuinely the better tool for the
 marketing surface and would win a Lighthouse contest outright. It is the wrong
 tool for the room: island boundaries fragment a store that four panels must read
 frame-consistently, and there is no layout-route concept to keep a
@@ -232,10 +235,12 @@ apps/
     src/auth/      OAuth, tokens, cookies
     src/rooms/     CRUD, directory, permission policy
     migrations/    forward-only SQL
-  web/             TanStack Start client
+  web/             Next.js 16 client (App Router)
+    src/app/       routes: landing, directory, create, room
     src/realtime/  clock estimator, socket, player sync
+    src/realtime/player/  one engine per source kind, one interface
     src/stores/    Zustand stores, one per bounded context
-    src/components/illustrations/   hand-authored SVGs
+    src/lib/themes.ts     the theme registry (mirrors the server's allowlist)
 packages/
   protocol/        wire contract — Zod schemas shared by both sides
 infra/caddy/       reverse proxy for non-Dokploy deployments

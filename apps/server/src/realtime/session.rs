@@ -164,10 +164,15 @@ impl Session {
                 Ok(())
             }
 
-            ClientMessage::QueueAdd {
-                video_id,
-                play_next,
-            } => self.handle_queue_add(&video_id, play_next).await,
+            ClientMessage::QueueAdd { url, play_next } => {
+                self.handle_queue_add(&url, play_next).await
+            }
+
+            ClientMessage::QueueImport { url } => self.handle_queue_import(&url).await,
+
+            ClientMessage::ReportDuration { seconds } => {
+                self.handle_report_duration(seconds).await
+            }
 
             ClientMessage::QueueRemove { item_id } => {
                 self.require(self.permissions.can_manage_queue, "You cannot edit the queue.")?;
@@ -309,6 +314,9 @@ impl Session {
             ClientMessage::KickParticipant { user_id } => self.handle_kick(user_id).await,
             ClientMessage::SetRole { user_id, role } => self.handle_set_role(user_id, &role).await,
             ClientMessage::TransferHost { user_id } => self.handle_transfer_host(user_id).await,
+            ClientMessage::DesignateSuccessor { user_id } => {
+                self.handle_designate_successor(user_id).await
+            }
         }
     }
 
@@ -465,8 +473,11 @@ impl Session {
             match &next {
                 Some(item) => timeline.load(
                     now,
-                    item.video_id.clone(),
+                    item.source(),
                     Some(item.id),
+                    // Zero means "not known yet" — true for every file and
+                    // stream, since only YouTube tells us the length up front.
+                    // The playing client reports it back via `report_duration`.
                     (item.duration_seconds > 0).then(|| f64::from(item.duration_seconds)),
                 ),
                 // Nothing left: stop cleanly rather than looping the last video.
@@ -522,11 +533,7 @@ impl Session {
 
     // -- Queue --------------------------------------------------------------
 
-    async fn handle_queue_add(
-        &mut self,
-        raw_video: &str,
-        play_next: bool,
-    ) -> Result<(), AppError> {
+    async fn handle_queue_add(&mut self, raw: &str, play_next: bool) -> Result<(), AppError> {
         self.require(
             self.permissions.can_manage_queue,
             "You cannot add to the queue in this room.",
@@ -539,55 +546,182 @@ impl Session {
             return Ok(());
         }
 
-        let video_id = util::parse_video_id(raw_video)
-            .ok_or_else(|| AppError::BadRequest("That is not a YouTube link.".into()))?;
+        let classified = crate::media::classify(raw).ok_or_else(|| {
+            AppError::BadRequest("That is not a link this room can play.".into())
+        })?;
 
-        let youtube = YouTube::new(
-            self.state.config.youtube.clone(),
-            self.state.http.clone(),
-        );
-        let mut redis = self.state.redis.clone();
-        let metadata = youtube.video(&mut redis, &video_id).await;
+        let source = match classified {
+            crate::media::Classified::Source(source) => source,
+            // Someone pasted a channel list into the single-item box. Doing
+            // what they clearly meant beats an error telling them to use a
+            // different field.
+            crate::media::Classified::Playlist { url } => return self.handle_queue_import(&url).await,
+        };
 
-        if !metadata.embeddable {
+        let item = self.describe(source).await?;
+
+        db::queue::add(&self.state.db, self.room.id, item, play_next).await?;
+        self.broadcast_queue().await?;
+        self.start_if_idle().await
+    }
+
+    /// Fetch a playlist URL and append everything on it.
+    async fn handle_queue_import(&mut self, raw: &str) -> Result<(), AppError> {
+        self.require(
+            self.permissions.can_manage_queue,
+            "You cannot add to the queue in this room.",
+        )?;
+
+        // An import is one request that can produce hundreds of rows, so it is
+        // metered far more tightly than a single add.
+        if !self.allow("queue_import", self.state.config.limits.imports_per_minute).await {
+            return Ok(());
+        }
+
+        let limits = &self.state.config.limits;
+        let fetched = crate::media::fetch::fetch_text(
+            raw,
+            limits.playlist_max_bytes,
+            limits.playlist_timeout,
+        )
+        .await?;
+
+        let entries = match crate::media::playlist::parse(&fetched.body, &fetched.final_url) {
+            crate::media::Parsed::Entries(entries) => entries,
+            // The URL turned out to name a single stream, not a list of them.
+            // Queue it as one item rather than reporting an empty import.
+            crate::media::Parsed::HlsManifest => {
+                let source = crate::media::MediaSource {
+                    kind: crate::media::SourceKind::Hls,
+                    url: fetched.final_url.clone(),
+                    video_id: None,
+                };
+                let item = self.describe(source).await?;
+                db::queue::add(&self.state.db, self.room.id, item, false).await?;
+                self.broadcast_queue().await?;
+                return self.start_if_idle().await;
+            }
+        };
+
+        if entries.is_empty() {
             return Err(AppError::BadRequest(
-                "That video cannot be embedded, so the room can't play it.".into(),
+                "That list had nothing this room can play.".into(),
             ));
         }
 
-        db::queue::add(
+        let count = entries.len();
+        let items: Vec<db::queue::NewQueueItem> = entries
+            .into_iter()
+            .map(|entry| db::queue::NewQueueItem {
+                title: entry.title,
+                channel_title: entry.group.unwrap_or_default(),
+                duration_seconds: 0,
+                thumbnail_url: entry.logo.unwrap_or_default(),
+                source: entry.source,
+                added_by: self.user.id,
+            })
+            .collect();
+
+        db::queue::add_many(&self.state.db, self.room.id, &items).await?;
+
+        db::chat::insert_system(
             &self.state.db,
             self.room.id,
-            db::queue::NewQueueItem {
-                video_id: metadata.video_id.clone(),
+            "video_changed",
+            &format!("{} added {count} items from a playlist.", self.user.display_name),
+        )
+        .await
+        .ok();
+
+        self.broadcast_queue().await?;
+        self.start_if_idle().await
+    }
+
+    /// Turn a source into a queue row, enriching it where we can.
+    ///
+    /// YouTube has an API that tells us the title, channel, length and — the
+    /// one that actually blocks playback — whether the video may be embedded at
+    /// all. Nothing equivalent exists for an arbitrary URL, so those rows carry
+    /// what can be derived from the URL itself and learn their duration from
+    /// the first client to play them.
+    async fn describe(
+        &self,
+        source: crate::media::MediaSource,
+    ) -> Result<db::queue::NewQueueItem, AppError> {
+        if let (crate::media::SourceKind::Youtube, Some(video_id)) =
+            (source.kind, source.video_id.clone())
+        {
+            let youtube = YouTube::new(self.state.config.youtube.clone(), self.state.http.clone());
+            let mut redis = self.state.redis.clone();
+            let metadata = youtube.video(&mut redis, &video_id).await;
+
+            if !metadata.embeddable {
+                return Err(AppError::BadRequest(
+                    "That video cannot be embedded, so the room can't play it.".into(),
+                ));
+            }
+
+            return Ok(db::queue::NewQueueItem {
+                source: crate::media::MediaSource::youtube(metadata.video_id.clone()),
                 title: metadata.title.clone(),
                 channel_title: metadata.channel_title.clone(),
                 duration_seconds: metadata.duration_seconds,
                 thumbnail_url: metadata.thumbnail_url.clone(),
                 added_by: self.user.id,
-            },
-            play_next,
-        )
-        .await?;
+            });
+        }
 
-        self.broadcast_queue().await?;
+        Ok(db::queue::NewQueueItem {
+            title: util::title_from_url(&source.url),
+            channel_title: String::new(),
+            duration_seconds: 0,
+            thumbnail_url: String::new(),
+            source,
+            added_by: self.user.id,
+        })
+    }
 
-        // An idle room starts playing the moment something is queued —
-        // otherwise the first person in has to add *and* press play.
+    /// An idle room starts playing the moment something is queued — otherwise
+    /// the first person in has to add *and* press play.
+    async fn start_if_idle(&self) -> Result<(), AppError> {
         let idle = {
             let state = self.room.state.lock().await;
-            state
-                .timeline
-                .as_ref()
-                .map(|t| t.video_id.is_none())
-                .unwrap_or(true)
+            state.timeline.as_ref().is_none_or(|t| !t.is_loaded())
         };
 
         if idle && self.state.hub.owns(self.room.id) {
             self.advance(AdvanceRequest::Next, TimelineReason::Advance)
                 .await?;
         }
+        Ok(())
+    }
 
+    /// Accept a duration measured by a client that has the media loaded.
+    ///
+    /// Only from someone who can control playback: the duration bounds seeks
+    /// and decides when the room auto-advances, so an arbitrary viewer being
+    /// able to set it would let them cut everyone else's video short.
+    async fn handle_report_duration(&mut self, seconds: f64) -> Result<(), AppError> {
+        if !self.permissions.can_control_playback {
+            return Ok(());
+        }
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return Ok(());
+        }
+
+        let accepted = {
+            let mut state = self.room.state.lock().await;
+            state
+                .timeline
+                .as_mut()
+                .is_some_and(|timeline| timeline.set_duration(seconds))
+        };
+
+        // Only the first report changes anything, so this does not turn into a
+        // broadcast per client per video.
+        if accepted {
+            self.publish_timeline(TimelineReason::Advance, None).await;
+        }
         Ok(())
     }
 
@@ -706,7 +840,7 @@ impl Session {
 
         let reached = {
             let mut state = self.room.state.lock().await;
-            if state.timeline.as_ref().and_then(|t| t.video_id.as_ref()).is_none() {
+            if state.timeline.as_ref().is_none_or(|t| !t.is_loaded()) {
                 return Err(AppError::BadRequest("Nothing is playing.".into()));
             }
             if voting {
@@ -865,14 +999,21 @@ impl Session {
     }
 
     async fn handle_set_role(&mut self, target: Uuid, role: &str) -> Result<(), AppError> {
-        self.require(self.permissions.can_kick, "You cannot change roles.")?;
+        self.require(
+            self.permissions.can_manage_roles,
+            "Only the host can change roles.",
+        )?;
 
         // Host is only ever granted through an explicit transfer, never here.
         let new_role = match role {
-            "moderator" => Role::Moderator,
+            "cohost" | "moderator" => Role::Cohost,
             "member" => Role::Member,
             _ => return Err(AppError::BadRequest("Unknown role.".into())),
         };
+
+        if target == self.user.id {
+            return Err(AppError::BadRequest("You cannot change your own role.".into()));
+        }
 
         let target_role = self
             .room
@@ -885,6 +1026,14 @@ impl Session {
         }
 
         db::rooms::set_role(&self.state.db, self.room.id, target, new_role.as_str()).await?;
+        db::history::audit(
+            &self.state.db,
+            Some(self.user.id),
+            Some(self.room.id),
+            "participant.role_changed",
+            serde_json::json!({ "target": target, "role": new_role.as_str() }),
+        )
+        .await;
 
         let updated = {
             let mut state = self.room.state.lock().await;
@@ -895,10 +1044,63 @@ impl Session {
         };
 
         if let Some(participant) = updated {
+            db::chat::insert_system(
+                &self.state.db,
+                self.room.id,
+                "role_changed",
+                &match new_role {
+                    Role::Cohost => format!("{} is now a co-host.", participant.user.display_name),
+                    _ => format!("{} is now a member.", participant.user.display_name),
+                },
+            )
+            .await
+            .ok();
+
             self.broadcast(&ServerMessage::ParticipantUpdated { participant })
                 .await;
         }
 
+        Ok(())
+    }
+
+    /// Nominate — or clear — who inherits the room when the host leaves.
+    ///
+    /// Advisory rather than binding: the nomination is consulted at handover
+    /// time, and if that person is no longer in the room the usual promotion
+    /// order applies. Storing it on the room rather than acting immediately is
+    /// what makes "hand it to Sam *when I go*" different from "hand it to Sam".
+    async fn handle_designate_successor(&mut self, target: Option<Uuid>) -> Result<(), AppError> {
+        self.require(
+            self.permissions.can_designate_successor,
+            "Only the host can choose a successor.",
+        )?;
+
+        if let Some(target) = target {
+            if target == self.user.id {
+                return Err(AppError::BadRequest(
+                    "You already host this room.".into(),
+                ));
+            }
+            // Only someone the room actually knows can be nominated; an
+            // arbitrary user id here would silently never inherit anything.
+            if db::rooms::find_membership(&self.state.db, self.room.id, target)
+                .await?
+                .is_none()
+            {
+                return Err(AppError::not_found("participant"));
+            }
+        }
+
+        db::rooms::set_successor(&self.state.db, self.room.id, target).await?;
+
+        let snapshot = {
+            let mut info = self.room.info.write().await;
+            info.successor_id = target;
+            info.clone()
+        };
+
+        self.broadcast(&ServerMessage::RoomUpdated { room: snapshot })
+            .await;
         Ok(())
     }
 
@@ -912,7 +1114,8 @@ impl Session {
             return Err(AppError::BadRequest("You already host this room.".into()));
         }
 
-        db::rooms::transfer_host(&self.state.db, self.room.id, self.user.id, target).await?;
+        // Explicit: the outgoing host meant it, so ownership moves with the room.
+        db::rooms::transfer_host(&self.state.db, self.room.id, self.user.id, target, true).await?;
         db::history::audit(
             &self.state.db,
             Some(self.user.id),
@@ -925,7 +1128,7 @@ impl Session {
         {
             let mut state = self.room.state.lock().await;
             if let Some(participant) = state.participants.get_mut(&self.user.id) {
-                participant.role = Role::Moderator;
+                participant.role = Role::Cohost;
             }
             if let Some(participant) = state.participants.get_mut(&target) {
                 participant.role = Role::Host;
@@ -935,7 +1138,7 @@ impl Session {
 
         // Our own authority changed; recompute it rather than trusting the
         // permissions we were constructed with.
-        self.role = Role::Moderator;
+        self.role = Role::Cohost;
         let settings = self.room.info.read().await.settings.clone();
         self.permissions = permissions::resolve(self.role, &settings);
 

@@ -1,96 +1,107 @@
-import type { UserSummary } from '@youtube-room/protocol';
-import { avatarGradient, cn } from '~/lib/utils';
+import * as React from "react"
+import { Avatar as AvatarPrimitive } from "@base-ui/react/avatar"
 
-const sizes = {
-  xs: 'size-6 text-[10px]',
-  sm: 'size-8 text-xs',
-  md: 'size-10 text-sm',
-  lg: 'size-14 text-lg',
-  xl: 'size-20 text-2xl',
-} as const;
+import { cn } from "~/lib/utils"
 
-interface AvatarProps {
-  user: Pick<UserSummary, 'displayName' | 'avatarUrl' | 'initials' | 'avatarHue'>;
-  size?: keyof typeof sizes;
-  /** Green ring + pulse while this person is talking. */
-  speaking?: boolean;
-  className?: string;
+function Avatar({
+  className,
+  size = "default",
+  ...props
+}: AvatarPrimitive.Root.Props & {
+  size?: "default" | "sm" | "lg"
+}) {
+  return (
+    <AvatarPrimitive.Root
+      data-slot="avatar"
+      data-size={size}
+      className={cn(
+        "group/avatar relative flex size-8 shrink-0 rounded-full select-none after:absolute after:inset-0 after:rounded-full after:border after:border-border after:mix-blend-darken data-[size=lg]:size-10 data-[size=sm]:size-6 dark:after:mix-blend-lighten",
+        className
+      )}
+      {...props}
+    />
+  )
 }
 
-/**
- * Avatar with a deterministic generated fallback.
- *
- * The initials gradient is derived from the user's id on the server, so the
- * same person is the same colour everywhere and across sessions without us
- * storing an image for guests — which is most of our users.
- */
-export function Avatar({ user, size = 'md', speaking, className }: AvatarProps) {
-  const hasImage = Boolean(user.avatarUrl);
+function AvatarImage({ className, ...props }: AvatarPrimitive.Image.Props) {
+  return (
+    <AvatarPrimitive.Image
+      data-slot="avatar-image"
+      className={cn(
+        "aspect-square size-full rounded-full object-cover",
+        className
+      )}
+      {...props}
+    />
+  )
+}
 
+function AvatarFallback({
+  className,
+  ...props
+}: AvatarPrimitive.Fallback.Props) {
+  return (
+    <AvatarPrimitive.Fallback
+      data-slot="avatar-fallback"
+      className={cn(
+        "flex size-full items-center justify-center rounded-full bg-muted text-sm text-muted-foreground group-data-[size=sm]/avatar:text-xs",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function AvatarBadge({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
+      data-slot="avatar-badge"
       className={cn(
-        'relative inline-grid place-items-center overflow-hidden rounded-full',
-        'font-semibold text-white select-none',
-        'ring-1 ring-[var(--border-default)]',
-        speaking && 'ring-2 ring-success-500 animate-speaking',
-        sizes[size],
-        className,
+        "absolute right-0 bottom-0 z-10 inline-flex items-center justify-center rounded-full bg-primary text-primary-foreground bg-blend-color ring-2 ring-background select-none",
+        "group-data-[size=sm]/avatar:size-2 group-data-[size=sm]/avatar:[&>svg]:hidden",
+        "group-data-[size=default]/avatar:size-2.5 group-data-[size=default]/avatar:[&>svg]:size-2",
+        "group-data-[size=lg]/avatar:size-3 group-data-[size=lg]/avatar:[&>svg]:size-2",
+        className
       )}
-      style={hasImage ? undefined : { backgroundImage: avatarGradient(user.avatarHue) }}
-    >
-      {hasImage ? (
-        <img
-          // The avatar is decorative next to the name it always accompanies;
-          // an alt here would make screen readers announce the name twice.
-          alt=""
-          src={user.avatarUrl ?? ''}
-          className="size-full object-cover"
-          loading="lazy"
-          decoding="async"
-          referrerPolicy="no-referrer"
-        />
-      ) : (
-        <span aria-hidden>{user.initials}</span>
-      )}
-    </span>
-  );
+      {...props}
+    />
+  )
 }
 
-/** Overlapping stack for participant previews on room cards. */
-export function AvatarStack({
-  users,
-  max = 4,
-  size = 'sm',
-}: {
-  users: UserSummary[];
-  max?: number;
-  size?: keyof typeof sizes;
-}) {
-  const shown = users.slice(0, max);
-  const overflow = users.length - shown.length;
-
+function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
-    <div className="flex items-center -space-x-2">
-      {shown.map((user) => (
-        <Avatar
-          key={user.id}
-          user={user}
-          size={size}
-          className="ring-2 ring-[var(--surface-raised)]"
-        />
-      ))}
-      {overflow > 0 ? (
-        <span
-          className={cn(
-            'grid place-items-center rounded-full bg-[var(--surface-hover)]',
-            'text-[var(--text-secondary)] font-medium ring-2 ring-[var(--surface-raised)]',
-            sizes[size],
-          )}
-        >
-          +{overflow}
-        </span>
-      ) : null}
-    </div>
-  );
+    <div
+      data-slot="avatar-group"
+      className={cn(
+        "group/avatar-group flex -space-x-2 *:data-[slot=avatar]:ring-2 *:data-[slot=avatar]:ring-background",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function AvatarGroupCount({
+  className,
+  ...props
+}: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="avatar-group-count"
+      className={cn(
+        "relative flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm text-muted-foreground ring-2 ring-background group-has-data-[size=lg]/avatar-group:size-10 group-has-data-[size=sm]/avatar-group:size-6 [&>svg]:size-4 group-has-data-[size=lg]/avatar-group:[&>svg]:size-5 group-has-data-[size=sm]/avatar-group:[&>svg]:size-3",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+export {
+  Avatar,
+  AvatarImage,
+  AvatarFallback,
+  AvatarGroup,
+  AvatarGroupCount,
+  AvatarBadge,
 }

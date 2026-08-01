@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { epochMs, playbackRate, seconds, videoId } from './primitives.ts';
+import { epochMs, mediaSource, playbackRate, seconds } from './primitives.ts';
 
 /**
  * The authoritative playback record. See docs/adr/0005-video-synchronization.md.
@@ -9,7 +9,8 @@ import { epochMs, playbackRate, seconds, videoId } from './primitives.ts';
  * to the same code path.
  */
 export const timeline = z.object({
-  videoId: videoId.nullable(),
+  /** `null` means the room is idle — nothing loaded, nothing playing. */
+  source: mediaSource.nullable(),
   /** Playback position that was true at `anchorAt`. */
   anchorPos: seconds,
   /** Server clock reading the anchor was taken at. */
@@ -22,6 +23,12 @@ export const timeline = z.object({
   queueItemId: z.uuid().nullable(),
   /** Loop the current video when it ends. */
   loop: z.boolean(),
+  /**
+   * Length in seconds, once known. YouTube reports it up front; a file or
+   * stream stays `null` until a client that has loaded it reports back, and a
+   * live stream stays `null` forever.
+   */
+  duration: z.number().nullable(),
 });
 export type Timeline = z.infer<typeof timeline>;
 
@@ -34,7 +41,7 @@ export type Timeline = z.infer<typeof timeline>;
  * `serverNowMs` rather than `now`.
  */
 export function positionAt(tl: Timeline, serverNowMs: number): number {
-  if (tl.videoId === null) return 0;
+  if (tl.source === null) return 0;
   if (tl.paused) return tl.anchorPos;
   const elapsed = (serverNowMs - tl.anchorAt) / 1000;
   return Math.max(0, tl.anchorPos + elapsed * tl.rate);

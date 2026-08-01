@@ -106,6 +106,8 @@ impl Hub {
             visibility: record.visibility.clone(),
             category: record.category.clone(),
             host_id: record.host_id,
+            owner_id: record.owner_id,
+            successor_id: record.successor_id,
             created_at: record.created_at.timestamp_millis(),
             max_participants: record.max_participants,
             settings: record.settings.0.clone(),

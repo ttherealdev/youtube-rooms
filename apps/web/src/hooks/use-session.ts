@@ -1,4 +1,4 @@
-import type { UserSummary } from '@youtube-room/protocol';
+import type { UserSummary } from '@playercn/protocol';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiUrl, refreshAccessToken, scheduleRefresh, setAccessToken } from '~/lib/api';
 

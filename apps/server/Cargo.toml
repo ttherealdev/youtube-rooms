@@ -1,9 +1,9 @@
 [package]
-name = "youtube-room-server"
+name = "playercn-server"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-description = "Authoritative realtime service for YouTube Room"
+description = "Authoritative realtime service for playercn"
 publish = false
 
 [dependencies]

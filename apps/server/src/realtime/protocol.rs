@@ -44,11 +44,26 @@ pub enum ClientMessage {
         buffering: bool,
     },
 
+    /// Add one source. `url` is anything a user can paste — a YouTube link or
+    /// id, a direct media URL, or a stream manifest — and the server decides
+    /// how it will be played.
     QueueAdd {
-        #[serde(rename = "videoId")]
-        video_id: String,
+        url: String,
         #[serde(default, rename = "playNext")]
         play_next: bool,
+    },
+
+    /// Expand a playlist URL and append everything on it.
+    QueueImport {
+        url: String,
+    },
+
+    /// Duration discovered by whichever client is playing.
+    ///
+    /// Files and streams do not advertise a length until a player has loaded
+    /// them, so the room cannot clamp seeks or auto-advance without this.
+    ReportDuration {
+        seconds: f64,
     },
     QueueRemove {
         #[serde(rename = "itemId")]
@@ -113,6 +128,12 @@ pub enum ClientMessage {
     TransferHost {
         #[serde(rename = "userId")]
         user_id: Uuid,
+    },
+    /// Nominate who inherits the room when the host leaves. `None` clears the
+    /// nomination and restores the default promotion order.
+    DesignateSuccessor {
+        #[serde(default, rename = "userId")]
+        user_id: Option<Uuid>,
     },
 }
 
@@ -313,7 +334,13 @@ pub struct RoomInfo {
     pub topic: Option<String>,
     pub visibility: String,
     pub category: String,
+    /// Who controls the room right now. Moves when the room changes hands.
     pub host_id: Uuid,
+    /// Who created it. Never moves, and is what lets a returning creator
+    /// reclaim a room that was auto-handed to someone else.
+    pub owner_id: Option<Uuid>,
+    /// Who the host nominated to inherit the room.
+    pub successor_id: Option<Uuid>,
     pub created_at: i64,
     pub max_participants: i32,
     pub settings: RoomSettings,
@@ -334,7 +361,9 @@ pub struct Participant {
 #[serde(rename_all = "camelCase")]
 pub struct QueueEntry {
     pub id: Uuid,
-    pub video_id: String,
+    /// How and where to play this item. Replaces the bare YouTube id: a room
+    /// can now queue files and streams alongside YouTube videos.
+    pub source: crate::media::MediaSource,
     pub title: String,
     pub channel_title: String,
     pub duration_seconds: i32,
@@ -348,7 +377,7 @@ impl QueueEntry {
     pub fn from_row(item: &QueueItem, added_by: UserSummary) -> Self {
         Self {
             id: item.id,
-            video_id: item.video_id.clone(),
+            source: item.source(),
             title: item.title.clone(),
             channel_title: item.channel_title.clone(),
             duration_seconds: item.duration_seconds,
@@ -437,11 +466,35 @@ mod tests {
     #[test]
     fn queue_add_defaults_play_next_to_false() {
         let parsed: ClientMessage =
-            serde_json::from_str(r#"{"t":"queue_add","videoId":"dQw4w9WgXcQ"}"#).unwrap();
+            serde_json::from_str(r#"{"t":"queue_add","url":"dQw4w9WgXcQ"}"#).unwrap();
         match parsed {
             ClientMessage::QueueAdd { play_next, .. } => assert!(!play_next),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn queue_add_takes_any_url_not_just_a_youtube_id() {
+        // The field is deliberately `url`, not `videoId`: a room queues files
+        // and streams now, and the server decides how each one plays.
+        for raw in [
+            r#"{"t":"queue_add","url":"https://cdn.example.com/a.mp4"}"#,
+            r#"{"t":"queue_add","url":"https://cdn.example.com/live.m3u8","playNext":true}"#,
+        ] {
+            assert!(serde_json::from_str::<ClientMessage>(raw).is_ok(), "failed on {raw}");
+        }
+    }
+
+    #[test]
+    fn clearing_a_successor_is_expressible_on_the_wire() {
+        // `{"userId":null}` has to mean "no successor", which is a different
+        // instruction from omitting the field in a partial update elsewhere.
+        let parsed: ClientMessage =
+            serde_json::from_str(r#"{"t":"designate_successor","userId":null}"#).unwrap();
+        assert!(matches!(
+            parsed,
+            ClientMessage::DesignateSuccessor { user_id: None }
+        ));
     }
 
     #[test]
@@ -501,6 +554,9 @@ mod wire_names {
                 can_edit_room: false,
                 can_vote_skip: true,
                 can_transfer_host: false,
+                can_manage_roles: false,
+                can_designate_successor: false,
+                can_set_room_theme: false,
             },
             room: RoomInfo {
                 id: uuid::Uuid::nil(),
@@ -510,6 +566,8 @@ mod wire_names {
                 visibility: "public".to_string(),
                 category: "music".to_string(),
                 host_id: uuid::Uuid::nil(),
+                owner_id: None,
+                successor_id: None,
                 created_at: 0,
                 max_participants: 25,
                 settings: crate::db::rooms::RoomSettings::default(),

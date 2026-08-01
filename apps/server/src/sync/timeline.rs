@@ -10,11 +10,12 @@
 //! This module is pure. It performs no I/O and holds no locks, which is what
 //! lets the whole thing be exhaustively unit-tested.
 
+use crate::media::MediaSource;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Rates the YouTube player actually honours. An arbitrary float here would be
-/// silently clamped by the player, desynchronising the room against its own
+/// Rates every player we drive actually honours. An arbitrary float here would
+/// be silently clamped by the player, desynchronising the room against its own
 /// authoritative record.
 pub const ALLOWED_RATES: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
@@ -26,7 +27,7 @@ pub fn is_allowed_rate(rate: f64) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct Timeline {
     /// `None` means the room is idle — nothing loaded, nothing playing.
-    pub video_id: Option<String>,
+    pub source: Option<MediaSource>,
     /// Playback position, in seconds, that was true at `anchor_at`.
     pub anchor_pos: f64,
     /// Server clock (ms since epoch) the anchor was taken at.
@@ -50,7 +51,7 @@ impl Timeline {
     /// An empty room: nothing loaded, paused at zero.
     pub fn idle(now_ms: i64) -> Self {
         Self {
-            video_id: None,
+            source: None,
             anchor_pos: 0.0,
             anchor_at: now_ms,
             rate: 1.0,
@@ -67,7 +68,7 @@ impl Timeline {
     /// Clamped at zero, and at the video duration when it is known, so a
     /// timeline left running past the end does not report a position beyond it.
     pub fn position_at(&self, server_now_ms: i64) -> f64 {
-        if self.video_id.is_none() {
+        if self.source.is_none() {
             return 0.0;
         }
         if self.paused {
@@ -87,7 +88,7 @@ impl Timeline {
 
     /// True once playback has run past the end of a known-duration video.
     pub fn has_ended(&self, server_now_ms: i64) -> bool {
-        match (self.video_id.as_ref(), self.duration) {
+        match (self.source.as_ref(), self.duration) {
             (Some(_), Some(duration)) if duration > 0.0 && !self.paused => {
                 let elapsed_s = (server_now_ms - self.anchor_at) as f64 / 1000.0;
                 self.anchor_pos + elapsed_s * self.rate >= duration
@@ -107,7 +108,7 @@ impl Timeline {
     }
 
     pub fn play(&mut self, now_ms: i64) {
-        if self.video_id.is_none() {
+        if self.source.is_none() {
             return;
         }
         self.reanchor(now_ms);
@@ -115,7 +116,7 @@ impl Timeline {
     }
 
     pub fn pause(&mut self, now_ms: i64) {
-        if self.video_id.is_none() {
+        if self.source.is_none() {
             return;
         }
         self.reanchor(now_ms);
@@ -123,7 +124,7 @@ impl Timeline {
     }
 
     pub fn seek(&mut self, now_ms: i64, position: f64) {
-        if self.video_id.is_none() {
+        if self.source.is_none() {
             return;
         }
         // Take the anchor first so the version bump and clamping stay in one place.
@@ -135,7 +136,7 @@ impl Timeline {
     /// re-anchor, every past second would be retroactively recomputed at the new
     /// rate and the room would jump.
     pub fn set_rate(&mut self, now_ms: i64, rate: f64) {
-        if !is_allowed_rate(rate) || self.video_id.is_none() {
+        if !is_allowed_rate(rate) || self.source.is_none() {
             return;
         }
         self.reanchor(now_ms);
@@ -147,21 +148,48 @@ impl Timeline {
         self.version += 1;
     }
 
-    /// Load a video and begin playing from the start.
+    /// Load a source and begin playing from the start.
     pub fn load(
         &mut self,
         now_ms: i64,
-        video_id: String,
+        source: MediaSource,
         queue_item_id: Option<Uuid>,
         duration: Option<f64>,
     ) {
-        self.video_id = Some(video_id);
+        self.source = Some(source);
         self.queue_item_id = queue_item_id;
         self.duration = duration;
         self.anchor_pos = 0.0;
         self.anchor_at = now_ms;
         self.paused = false;
         self.version += 1;
+    }
+
+    /// Record a duration discovered at playback time.
+    ///
+    /// Only YouTube tells us how long a video is before it plays. For a file or
+    /// a stream the length is not known until a client has loaded it and read
+    /// its metadata, so the client reports it back and the room learns the
+    /// bound it needs in order to clamp seeks and auto-advance.
+    ///
+    /// Ignored once a duration is known: a second client reporting a slightly
+    /// different value must not re-anchor the room, and a live stream that
+    /// reports a growing duration must not drag the end of the video with it.
+    pub fn set_duration(&mut self, duration: f64) -> bool {
+        if self.source.is_none() || self.duration.is_some() {
+            return false;
+        }
+        if !duration.is_finite() || duration <= 0.0 {
+            return false;
+        }
+        self.duration = Some(duration);
+        self.version += 1;
+        true
+    }
+
+    /// Is a source currently loaded?
+    pub fn is_loaded(&self) -> bool {
+        self.source.is_some()
     }
 
     /// Clear the room back to idle, preserving the version counter so clients
@@ -173,7 +201,7 @@ impl Timeline {
     }
 
     pub fn restart(&mut self, now_ms: i64) {
-        if self.video_id.is_none() {
+        if self.source.is_none() {
             return;
         }
         self.reanchor(now_ms);
@@ -191,12 +219,13 @@ impl Timeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::SourceKind;
 
     const T0: i64 = 1_700_000_000_000;
 
     fn playing() -> Timeline {
         let mut tl = Timeline::idle(T0);
-        tl.load(T0, "dQw4w9WgXcQ".into(), None, Some(212.0));
+        tl.load(T0, MediaSource::youtube("dQw4w9WgXcQ".into()), None, Some(212.0));
         tl
     }
 
@@ -346,7 +375,79 @@ mod tests {
         let before = tl.version;
         tl.clear(T0 + 1_000);
         assert!(tl.version > before);
-        assert!(tl.video_id.is_none());
+        assert!(tl.source.is_none());
+    }
+
+    fn unknown_length() -> Timeline {
+        // What a file or stream looks like when it is first loaded: playing,
+        // but with no idea how long it is.
+        let mut tl = Timeline::idle(T0);
+        tl.load(
+            T0,
+            MediaSource {
+                kind: SourceKind::File,
+                url: "https://cdn.example.com/clip.mp4".into(),
+                video_id: None,
+            },
+            None,
+            None,
+        );
+        tl
+    }
+
+    #[test]
+    fn a_client_can_teach_the_room_how_long_an_unknown_source_is() {
+        let mut tl = unknown_length();
+        assert!(tl.set_duration(90.0));
+        assert_eq!(tl.duration, Some(90.0));
+        // And the room can now clamp against it.
+        tl.seek(T0, 9_999.0);
+        assert!((tl.position_at(T0) - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn only_the_first_duration_report_is_accepted() {
+        // Otherwise every client in the room re-anchors the timeline as it
+        // loads, and a room of ten people gets ten spurious updates.
+        let mut tl = unknown_length();
+        assert!(tl.set_duration(90.0));
+        assert!(!tl.set_duration(91.5));
+        assert_eq!(tl.duration, Some(90.0));
+    }
+
+    #[test]
+    fn a_youtube_duration_known_up_front_is_not_overwritten() {
+        let mut tl = playing();
+        assert!(!tl.set_duration(10.0), "the API already told us");
+        assert_eq!(tl.duration, Some(212.0));
+    }
+
+    #[test]
+    fn a_live_stream_never_gains_a_duration() {
+        // Browsers report `Infinity` for a live HLS stream. Accepting it would
+        // make `has_ended` true immediately and skip the channel.
+        let mut tl = unknown_length();
+        assert!(!tl.set_duration(f64::INFINITY));
+        assert!(!tl.set_duration(f64::NAN));
+        assert!(!tl.set_duration(0.0));
+        assert!(!tl.set_duration(-5.0));
+        assert_eq!(tl.duration, None);
+        assert!(!tl.has_ended(T0 + 10_000_000));
+    }
+
+    #[test]
+    fn an_idle_room_ignores_a_duration_report() {
+        let mut tl = Timeline::idle(T0);
+        assert!(!tl.set_duration(90.0));
+        assert_eq!(tl.duration, None);
+    }
+
+    #[test]
+    fn accepting_a_duration_bumps_the_version_so_clients_apply_it() {
+        let mut tl = unknown_length();
+        let before = tl.version;
+        assert!(tl.set_duration(90.0));
+        assert!(tl.version > before);
     }
 
     #[test]

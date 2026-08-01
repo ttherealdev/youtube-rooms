@@ -1,4 +1,4 @@
-import { CLOCK } from '@youtube-room/protocol';
+import { CLOCK } from '@playercn/protocol';
 
 /**
  * Estimates the offset between this browser's clock and the server's.

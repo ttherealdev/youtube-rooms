@@ -1,5 +1,5 @@
 {
-  "name": "youtube-room",
+  "name": "playercn",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -15,7 +15,7 @@
     "format": "biome format --write .",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "test:protocol": "pnpm --filter @youtube-room/protocol test",
+    "test:protocol": "pnpm --filter @playercn/protocol test",
     "server:dev": "cargo run --manifest-path apps/server/Cargo.toml",
     "server:check": "cargo check --manifest-path apps/server/Cargo.toml --all-targets",
     "server:lint": "cargo clippy --manifest-path apps/server/Cargo.toml --all-targets -- -D warnings",

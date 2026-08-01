@@ -212,7 +212,7 @@ async fn create_room(
                 &state.db,
                 room.id,
                 db::queue::NewQueueItem {
-                    video_id: metadata.video_id,
+                    source: crate::media::MediaSource::youtube(metadata.video_id),
                     title: metadata.title,
                     channel_title: metadata.channel_title,
                     duration_seconds: metadata.duration_seconds,
@@ -755,6 +755,8 @@ struct UpdateRoomRequest {
     auto_advance: Option<bool>,
     #[serde(default)]
     theme: Option<String>,
+    #[serde(default)]
+    theme_mode: Option<String>,
 }
 
 /// Distinguish "field absent" from "field set to null" — the difference between
@@ -816,8 +818,21 @@ async fn update_room(
     if let Some(v) = body.auto_advance {
         settings.auto_advance = v;
     }
+    // The theme is applied to every client in the room and lands in a
+    // `data-theme` attribute, so it is validated against the registry rather
+    // than merely truncated. Truncating an arbitrary string still stores an
+    // arbitrary string.
     if let Some(v) = body.theme {
-        settings.theme = v.chars().take(32).collect();
+        if !crate::rooms::themes::is_valid_theme(&v) {
+            return Err(AppError::field("theme", "Unknown theme."));
+        }
+        settings.theme = v;
+    }
+    if let Some(v) = body.theme_mode {
+        if !crate::rooms::themes::is_valid_mode(&v) {
+            return Err(AppError::field("themeMode", "Use light or dark."));
+        }
+        settings.theme_mode = v;
     }
 
     let password_hash = match body.password {
