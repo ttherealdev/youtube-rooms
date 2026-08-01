@@ -22,13 +22,28 @@ function playing(overrides: Partial<Timeline> = {}): Timeline {
     queueItemId: null,
     loop: false,
     duration: null,
+    // Already started. A cued timeline is `awaitingStart: true` and paused at
+    // zero, which is a different fixture — see `cued` below.
+    awaitingStart: false,
     ...overrides,
   };
+}
+
+/** A source loaded but held, waiting for a player to report it can start. */
+function cued(overrides: Partial<Timeline> = {}): Timeline {
+  return playing({ paused: true, awaitingStart: true, ...overrides });
 }
 
 describe('positionAt', () => {
   it('advances with the server clock', () => {
     assert.equal(positionAt(playing(), T0 + 10_000), 10);
+  });
+
+  it('holds at zero while a cued source waits to start', () => {
+    // Regression: the room used to start its clock the instant a source
+    // loaded, so a large file reached its own end — and auto-advanced past it
+    // — while every player was still downloading the first frame.
+    assert.equal(positionAt(cued(), T0 + 30_000), 0);
   });
 
   it('freezes while paused', () => {
