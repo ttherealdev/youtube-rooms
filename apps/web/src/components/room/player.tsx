@@ -102,6 +102,10 @@ export function Player({
   // an ordinary video right up until it is a 24/7 broadcast.
   const [engineLive, setEngineLive] = useState(false);
   const [qualities, setQualities] = useState<string[]>([]);
+  const [quality, setQuality] = useState<string | null>(null);
+  // The browser refused an audible start, so the engine went silent to get
+  // playing at all. The room owes the viewer a way to turn the sound back on.
+  const [audioBlocked, setAudioBlocked] = useState(false);
 
   const source = timeline?.source ?? null;
   // The engine's identity is the source, not the timeline: rebuilding on every
@@ -112,12 +116,12 @@ export function Player({
   // Which of the two mounts this source draws into: a third-party iframe, or
   // the plain media element.
   const embedded = source ? EMBEDDED_KINDS.has(source.kind) : false;
-  // Kick publishes an embed but no API for it, so the room cannot drive
-  // *transport* — play, pause, seek, volume. It can still change what is
-  // playing, because that replaces the whole player. Conflating the two
-  // stranded the room: a Kick stream disabled Next and there was no way out of
-  // it except leaving.
-  const drivable = source?.kind !== 'kick';
+  // Kick's embed takes no volume parameter and no volume call, so it gets a
+  // mute toggle instead of a slider rather than a slider that does nothing.
+  // Everything else, Kick included, can now be driven: its engine does
+  // transport by rebuilding the iframe, which is sound for a live edge because
+  // there is no position to lose.
+  const hasVolume = source?.kind !== 'kick';
   const awaiting = timeline?.awaitingStart ?? false;
   const paused = timeline?.paused ?? true;
   const duration = timeline?.duration ?? null;
@@ -153,6 +157,8 @@ export function Player({
     setBuffering(true);
     setEngineLive(false);
     setQualities([]);
+    setQuality(null);
+    setAudioBlocked(false);
 
     const events = {
       onBufferingChange: setBuffering,
@@ -169,7 +175,17 @@ export function Player({
         socket?.send({ t: 'playback_ready', version: versionRef.current });
       },
       onLive: () => setEngineLive(true),
-      onQualitiesChange: () => setQualities(engineRef.current?.qualities?.() ?? []),
+      // The engine has muted itself to get playing at all, so the mute control
+      // has to agree — otherwise it shows an unmuted speaker over silence, and
+      // clicking it "unmutes" something already muted and does nothing.
+      onAudioBlocked: () => {
+        setAudioBlocked(true);
+        setMuted(true);
+      },
+      onQualitiesChange: () => {
+        setQualities(engineRef.current?.qualities?.() ?? []);
+        setQuality(engineRef.current?.quality?.() ?? null);
+      },
       onDurationChange: (seconds: number) => {
         // Only the room's authority learns durations for us; anyone able to
         // control playback may report, and the server keeps the first.
@@ -255,6 +271,31 @@ export function Player({
       setMuted(next === 0);
       engine?.setVolume(next);
       engine?.setMuted(next === 0);
+      if (next > 0) setAudioBlocked(false);
+    },
+    [engine],
+  );
+
+  /**
+   * Take the browser up on its offer.
+   *
+   * Autoplay policy only refuses playback that no gesture asked for, so this
+   * handler — running inside a real click — is the one moment unmuting is
+   * allowed. Kick reloads its iframe to do it; everything else just unmutes.
+   */
+  const restoreAudio = useCallback(() => {
+    setAudioBlocked(false);
+    setMuted(false);
+    if (volume === 0) setVolume(1);
+    engine?.setVolume(volume === 0 ? 1 : volume);
+    engine?.setMuted(false);
+    void engine?.play();
+  }, [engine, volume]);
+
+  const applyQuality = useCallback(
+    (next: string | null) => {
+      setQuality(next);
+      engine?.setQuality?.(next);
     },
     [engine],
   );
@@ -298,18 +339,17 @@ export function Player({
       />
 
       {/* Click target over the picture. It sits *under* the control bar, and
-          for YouTube it doubles as the lid that stops the iframe eating clicks
-          and letting one person drive their own player out of sync. */}
-      {drivable ? (
-        <button
-          type="button"
-          onClick={toggle}
-          onDoubleClick={() => toggleFullscreen(containerRef.current)}
-          disabled={!canControl}
-          aria-label={paused ? 'Play' : 'Pause'}
-          className="absolute inset-0 z-10 cursor-default disabled:cursor-default"
-        />
-      ) : null}
+          for the embeds it doubles as the lid that stops the iframe eating
+          clicks — both to keep one person from driving their own player out of
+          sync, and to keep the embed's own chrome from ever surfacing. */}
+      <button
+        type="button"
+        onClick={toggle}
+        onDoubleClick={() => toggleFullscreen(containerRef.current)}
+        disabled={!canControl}
+        aria-label={paused ? 'Play' : 'Pause'}
+        className="absolute inset-0 z-10 cursor-default disabled:cursor-default"
+      />
 
       <StatusOverlay
         awaiting={awaiting}
@@ -318,9 +358,12 @@ export function Player({
         paused={paused}
         canControl={canControl}
         source={source}
-        drivable={drivable}
         onSkip={() => send({ kind: 'next' })}
       />
+
+      {/* Above the lid, because it exists to receive the one click the lid
+          would otherwise swallow. */}
+      {audioBlocked && !paused ? <UnmuteOverlay onUnmute={restoreAudio} /> : null}
 
       <div
         className={cn(
@@ -372,7 +415,7 @@ export function Player({
           <div className="flex items-center gap-0.5 sm:gap-1">
             <ControlButton
               label={paused ? 'Play' : 'Pause'}
-              disabled={!canControl || !drivable}
+              disabled={!canControl}
               onClick={toggle}
             >
               {paused ? (
@@ -429,18 +472,18 @@ export function Player({
               }}
             />
 
-            {drivable ? (
-              <VolumeControl
-                muted={muted}
-                volume={volume}
-                onMute={() => {
-                  const next = !muted;
-                  setMuted(next);
-                  engine?.setMuted(next);
-                }}
-                onVolume={applyVolume}
-              />
-            ) : null}
+            <VolumeControl
+              muted={muted}
+              volume={volume}
+              slider={hasVolume}
+              onMute={() => {
+                const next = !muted;
+                setMuted(next);
+                engine?.setMuted(next);
+                if (!next) setAudioBlocked(false);
+              }}
+              onVolume={applyVolume}
+            />
 
             {/* Only shown when the source actually offers a choice — a plain
                 file has one rendition, and a menu of one is noise. Quality is
@@ -454,9 +497,10 @@ export function Player({
                       variant="ghost"
                       size="sm"
                       aria-label="Quality"
-                      className="h-9 min-w-9 px-2 text-xs font-medium text-white hover:bg-white/15 hover:text-white"
+                      className="h-9 min-w-9 gap-1.5 px-2 text-xs font-medium text-white hover:bg-white/15 hover:text-white"
                     >
                       <Settings2 className="size-4" />
+                      {quality ? <span data-numeric>{quality}</span> : null}
                     </Button>
                   }
                 />
@@ -464,12 +508,13 @@ export function Player({
                   <DropdownMenuGroup>
                     <DropdownMenuLabel>Quality</DropdownMenuLabel>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => engine?.setQuality?.(null)}>
-                      Auto
+                    <DropdownMenuItem onClick={() => applyQuality(null)}>
+                      Auto{quality === null ? ' ·' : ''}
                     </DropdownMenuItem>
                     {qualities.map((option) => (
-                      <DropdownMenuItem key={option} onClick={() => engine?.setQuality?.(option)}>
+                      <DropdownMenuItem key={option} onClick={() => applyQuality(option)}>
                         {option}
+                        {option === quality ? ' ·' : ''}
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuGroup>
@@ -477,7 +522,7 @@ export function Player({
               </DropdownMenu>
             ) : null}
 
-            {live || !drivable ? null : (
+            {live ? null : (
               <DropdownMenu>
                 <DropdownMenuTrigger
                   render={
@@ -723,15 +768,26 @@ function LoopButton({
 function VolumeControl({
   muted,
   volume,
+  slider,
   onMute,
   onVolume,
 }: {
   muted: boolean;
   volume: number;
+  /** False for a source that can only be muted or not — Kick has no level. */
+  slider: boolean;
   onMute: () => void;
   onVolume: (value: number) => void;
 }) {
   const Icon = muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
+
+  if (!slider) {
+    return (
+      <ControlButton label={muted ? 'Unmute' : 'Mute'} onClick={onMute}>
+        <Icon className="size-5" />
+      </ControlButton>
+    );
+  }
 
   return (
     <div className="group/volume flex items-center">
@@ -775,7 +831,6 @@ function StatusOverlay({
   paused,
   canControl,
   source,
-  drivable,
   onSkip,
 }: {
   awaiting: boolean;
@@ -784,7 +839,6 @@ function StatusOverlay({
   paused: boolean;
   canControl: boolean;
   source: MediaSource;
-  drivable: boolean;
   onSkip: () => void;
 }) {
   if (error) {
@@ -814,7 +868,7 @@ function StatusOverlay({
     );
   }
 
-  if (!paused || !drivable) return null;
+  if (!paused) return null;
 
   // A paused YouTube embed draws a grid of related videos over the picture, and
   // no player parameter turns it off — `rel=0` only narrows it to the same
@@ -835,6 +889,31 @@ function StatusOverlay({
       <span className="relative grid size-16 place-items-center rounded-full bg-black/55 backdrop-blur-sm">
         <Play className="size-7 fill-white text-white" />
       </span>
+    </div>
+  );
+}
+
+/**
+ * The way back to having sound.
+ *
+ * Every viewer except whoever pressed play gets their playback started by the
+ * sync loop rather than by a click, and browsers refuse to start audible
+ * playback nobody asked for. The engines recover by muting, which means the
+ * room is playing correctly and silently — a state that is invisible unless it
+ * is said out loud. This is deliberately a real button sitting above the
+ * click-lid, because the click it receives is what makes unmuting legal.
+ */
+function UnmuteOverlay({ onUnmute }: { onUnmute: () => void }) {
+  return (
+    <div className="absolute inset-x-0 top-0 z-30 flex justify-center p-3 sm:p-4">
+      <Button
+        size="sm"
+        onClick={onUnmute}
+        className="gap-2 rounded-full bg-white text-black shadow-lg hover:bg-white/90"
+      >
+        <VolumeX className="size-4" />
+        Tap for sound
+      </Button>
     </div>
   );
 }
@@ -941,10 +1020,8 @@ function describeState({
 }): string {
   if (awaiting) return 'Waiting for everyone to load…';
   if (buffering) return 'Buffering…';
-  // Kick's embed takes no commands from the page, so saying where the controls
-  // are is more useful than naming the channel again.
-  if (source.kind === 'kick') return 'Kick — use the player’s own controls';
   if (nowPlaying?.channelTitle) return nowPlaying.channelTitle;
+  if (source.kind === 'kick') return 'Kick';
   if (source.kind === 'twitch') return 'Twitch';
   if (live) return 'Live stream';
   try {

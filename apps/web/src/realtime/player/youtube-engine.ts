@@ -10,6 +10,40 @@ import {
 import { type EngineEvents, type PlayerEngine, usableDuration } from './engine';
 
 /**
+ * YouTube's internal rendition names, in the order the API reports them.
+ *
+ * The API speaks in labels like `hd1080` and `large`, and nobody outside
+ * YouTube knows that `large` means 480p. The menu shows the right-hand side and
+ * this engine translates back, so the rest of the app never has to learn the
+ * vocabulary.
+ */
+const QUALITY_LABELS: Record<string, string> = {
+  highres: '4320p',
+  hd2880: '2880p',
+  hd2160: '2160p',
+  hd1440: '1440p',
+  hd1080: '1080p',
+  hd720: '720p',
+  large: '480p',
+  medium: '360p',
+  small: '240p',
+  tiny: '144p',
+};
+
+/**
+ * How long to wait before concluding the browser refused an audible start.
+ *
+ * Autoplay policy rejects playback no gesture asked for, and the IFrame API
+ * reports that as *nothing happening at all*: no error, no state change, no
+ * callback. Asking again shortly afterwards is the only way to notice.
+ */
+const AUTOPLAY_GRACE_MS = 1200;
+
+/** How often to look for renditions, and for how long, once playback starts. */
+const QUALITY_POLL_MS = 1000;
+const QUALITY_POLL_LIMIT = 15;
+
+/**
  * The YouTube adapter.
  *
  * The IFrame API is asynchronous to construct and rejects every call made
@@ -35,6 +69,17 @@ export class YouTubeEngine implements PlayerEngine {
    * position that meant nothing. Live streams must report *no* duration.
    */
   #live = false;
+
+  /** Human label to YouTube's name, for translating a menu choice back. */
+  #levels = new Map<string, string>();
+  #qualities: string[] = [];
+  #pinned: string | null = null;
+
+  #timers = new Set<ReturnType<typeof setTimeout>>();
+  /** Set once the engine has muted itself to get past autoplay policy. */
+  #blocked = false;
+  /** An autoplay check is already outstanding; the sync loop must not add more. */
+  #verifying = false;
 
   /** Commands issued before the player existed, replayed on ready. */
   #pending: { playing: boolean; position: number | null; rate: number } = {
@@ -65,9 +110,26 @@ export class YouTubeEngine implements PlayerEngine {
     // The room may have moved on while the API was loading.
     if (this.#destroyed) return;
 
-    const player = new api.Player(container, {
+    // The API *replaces* whatever element it is given with its iframe. Handing
+    // it the room's shared mount destroyed that node: React still held a ref to
+    // the detached original, the teardown's `replaceChildren()` then cleared a
+    // node that was no longer in the document, and every dead player stayed
+    // stacked in the DOM. It gets its own disposable child instead.
+    const slot = document.createElement('div');
+    slot.style.width = '100%';
+    slot.style.height = '100%';
+    container.appendChild(slot);
+
+    const player = new api.Player(slot, {
       videoId: source.videoId,
       host: PLAYER_HOST,
+      // Without these the API stamps its default 640×390 onto the iframe. That
+      // is not just a layout bug: YouTube picks its rendition from the size of
+      // the player, so a 640-wide iframe stretched over a 1080p-wide card was
+      // being served 360p and upscaled. This is the fix for "the quality is
+      // terrible" — not anything in the quality menu.
+      width: '100%',
+      height: '100%',
       playerVars: { ...PLAYER_VARS },
       events: {
         onReady: ({ target }) => {
@@ -76,6 +138,7 @@ export class YouTubeEngine implements PlayerEngine {
             return;
           }
           this.#player = target;
+          this.#fillContainer(target);
           this.#live = target.getVideoData?.()?.isLive ?? false;
           this.#applyPending();
           this.#events.onReady?.();
@@ -96,6 +159,9 @@ export class YouTubeEngine implements PlayerEngine {
             this.#live = target.getVideoData?.()?.isLive ?? this.#live;
             if (this.#live && !wasLive) this.#events.onLive?.();
             this.#reportDuration(target);
+            // Renditions do not exist until the player has chosen a stream, so
+            // this is the first moment there is a menu to build.
+            this.#pollQualities();
           }
           if (data === PlayerState.Paused) this.#events.onIntentPause?.();
         },
@@ -109,6 +175,49 @@ export class YouTubeEngine implements PlayerEngine {
     if (this.#destroyed) player.destroy();
   }
 
+  /** Make the created iframe fill its container rather than sit at 640×390. */
+  #fillContainer(player: YouTubePlayer): void {
+    const frame = player.getIframe?.();
+    if (!frame) return;
+    frame.style.width = '100%';
+    frame.style.height = '100%';
+    frame.style.display = 'block';
+    frame.setAttribute('width', '100%');
+    frame.setAttribute('height', '100%');
+  }
+
+  #after(ms: number, run: () => void): void {
+    const id = setTimeout(() => {
+      this.#timers.delete(id);
+      if (!this.#destroyed) run();
+    }, ms);
+    this.#timers.add(id);
+  }
+
+  /**
+   * Look for renditions until they appear.
+   *
+   * `getAvailableQualityLevels()` answers with an empty array until the player
+   * has actually selected a stream, and there is no event for the moment it
+   * fills in — so the menu that was wired to `onQualitiesChange` never had
+   * anything to show, and the room hid it as "this source offers no choice".
+   */
+  #pollQualities(attempt = 0): void {
+    if (this.#destroyed || attempt >= QUALITY_POLL_LIMIT) return;
+
+    const levels = this.#player?.getAvailableQualityLevels?.() ?? [];
+    const named = levels.filter((level) => level in QUALITY_LABELS);
+
+    if (named.length > 0) {
+      this.#levels = new Map(named.map((level) => [QUALITY_LABELS[level] as string, level]));
+      this.#qualities = named.map((level) => QUALITY_LABELS[level] as string);
+      this.#events.onQualitiesChange?.();
+      return;
+    }
+
+    this.#after(QUALITY_POLL_MS, () => this.#pollQualities(attempt + 1));
+  }
+
   #applyPending(): void {
     const player = this.#player;
     if (!player) return;
@@ -117,8 +226,47 @@ export class YouTubeEngine implements PlayerEngine {
     if (this.#pending.position !== null) {
       player.seekTo(this.#pending.position, true);
     }
-    if (this.#pending.playing) player.playVideo();
+    if (this.#pending.playing) this.#start();
     else player.pauseVideo();
+  }
+
+  /**
+   * Start playing, working around the browser's autoplay policy.
+   *
+   * The room presses play on everyone's behalf, so for every viewer who did not
+   * click it themselves this is an unprompted audible start — which browsers
+   * refuse. YouTube's answer to being refused is to render its own play button
+   * over the video and report nothing, and the room's click-lid sits on top of
+   * that button, so the viewer is left staring at a still frame with no way to
+   * recover. Muting is always permitted, so a refusal is retried silently and
+   * the room is told to offer the sound back.
+   */
+  #start(): void {
+    const player = this.#player;
+    if (!player) return;
+
+    // The sync loop calls play() on every tick, so this is the common path by
+    // a wide margin: already going, nothing to do. Re-issuing the command would
+    // also mean a fresh autoplay check every tick.
+    const state = player.getPlayerState();
+    if (state === PlayerState.Playing || state === PlayerState.Buffering) return;
+
+    player.playVideo();
+    if (this.#blocked || this.#verifying) return;
+
+    this.#verifying = true;
+    this.#after(AUTOPLAY_GRACE_MS, () => {
+      this.#verifying = false;
+      // Still meant to be playing, and demonstrably is not.
+      if (!this.#pending.playing || !this.#player) return;
+      const now = this.#player.getPlayerState();
+      if (now === PlayerState.Playing || now === PlayerState.Buffering) return;
+
+      this.#blocked = true;
+      this.#player.mute();
+      this.#player.playVideo();
+      this.#events.onAudioBlocked?.();
+    });
   }
 
   /**
@@ -154,17 +302,39 @@ export class YouTubeEngine implements PlayerEngine {
   }
 
   qualities(): string[] {
-    return this.#player?.getAvailableQualityLevels?.() ?? [];
+    return this.#qualities;
   }
 
+  /**
+   * The *pinned* rendition, not the one the player happens to be showing.
+   *
+   * Null means the room has left YouTube to choose. Reporting the level it
+   * chose would tick a row in the menu that nobody selected, and make "Auto"
+   * look like it was never applied.
+   */
   quality(): string | null {
-    return this.#player?.getPlaybackQuality?.() ?? null;
+    return this.#pinned;
   }
 
-  setQuality(quality: string): void {
-    // Advisory on YouTube: the player treats it as a ceiling and still adapts
-    // downwards on a poor connection, which is the behaviour people expect.
-    this.#player?.setPlaybackQuality?.(quality);
+  setQuality(quality: string | null): void {
+    const player = this.#player;
+    if (!player) return;
+
+    if (quality === null) {
+      this.#pinned = null;
+      player.setPlaybackQualityRange?.('tiny', 'highres');
+      player.setPlaybackQuality?.('default');
+      return;
+    }
+
+    const level = this.#levels.get(quality);
+    if (!level) return;
+    this.#pinned = quality;
+    // The range is what the modern player actually honours; the older setter is
+    // called too because which one works has changed before and the losing call
+    // costs nothing.
+    player.setPlaybackQualityRange?.(level, level);
+    player.setPlaybackQuality?.(level);
   }
 
   buffering(): boolean {
@@ -177,7 +347,7 @@ export class YouTubeEngine implements PlayerEngine {
 
   play(): void {
     this.#pending.playing = true;
-    this.#player?.playVideo();
+    this.#start();
   }
 
   pause(): void {
@@ -203,12 +373,17 @@ export class YouTubeEngine implements PlayerEngine {
 
   setMuted(muted: boolean): void {
     if (!this.#player) return;
+    // Turning the sound back on is what clears the block, so a later corrective
+    // play() does not immediately mute the viewer again.
+    if (!muted) this.#blocked = false;
     if (muted) this.#player.mute();
     else this.#player.unMute();
   }
 
   destroy(): void {
     this.#destroyed = true;
+    for (const id of this.#timers) clearTimeout(id);
+    this.#timers.clear();
     this.#player?.destroy();
     this.#player = null;
   }

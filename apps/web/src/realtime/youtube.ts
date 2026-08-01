@@ -30,6 +30,17 @@ export interface YouTubePlayer {
   getAvailableQualityLevels?(): string[];
   getPlaybackQuality?(): string;
   setPlaybackQuality?(quality: string): void;
+  /**
+   * Undocumented, and the only rendition control the modern player still obeys.
+   *
+   * `setPlaybackQuality` has been advisory to the point of being ignored since
+   * the player moved to adaptive streaming; setting a *range* is what actually
+   * pins the ceiling. Both are called, because which one works has changed
+   * before and the losing call is harmless.
+   */
+  setPlaybackQualityRange?(min: string, max?: string): void;
+  /** The iframe the API created, so it can be sized to its container. */
+  getIframe?(): HTMLIFrameElement;
   playVideo(): void;
   pauseVideo(): void;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
@@ -54,6 +65,13 @@ interface YouTubeApi {
     config: {
       videoId?: string;
       host?: string;
+      /**
+       * Given as strings so the iframe fills its container. Left unset, the API
+       * stamps its default 640×390 on — and YouTube picks its rendition from
+       * the size of the player, so the default is also a quality ceiling.
+       */
+      width?: string | number;
+      height?: string | number;
       playerVars?: Record<string, string | number>;
       events?: {
         onReady?: (event: { target: YouTubePlayer }) => void;

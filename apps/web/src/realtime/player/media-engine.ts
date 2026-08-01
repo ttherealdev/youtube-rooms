@@ -35,6 +35,8 @@ export class MediaEngine implements PlayerEngine {
   /** hls.js / dash.js instance, when one is in use. */
   #streaming: { destroy: () => void } | null = null;
   #detach: Array<() => void> = [];
+  /** Set once the engine has muted itself to get past autoplay policy. */
+  #blocked = false;
 
   /**
    * Rendition control, populated only by the adaptive backends.
@@ -325,13 +327,39 @@ export class MediaEngine implements PlayerEngine {
     this.#renditions.set(quality);
   }
 
+  /**
+   * Start playing, recovering from an autoplay refusal.
+   *
+   * Unlike the embeds, a `<video>` says so plainly: `play()` returns a promise
+   * that rejects with `NotAllowedError`. The room starts playback from its sync
+   * loop rather than from a click, so every viewer who did not press play
+   * themselves is asking for an unprompted audible start, which browsers
+   * refuse. Muting is always permitted, so a refusal is retried silently and
+   * the room offers the sound back.
+   */
   async play(): Promise<void> {
+    const video = this.#video;
+    if (!video.paused) return;
+
     try {
-      await this.#video.play();
+      await video.play();
     } catch {
-      // Autoplay was refused. That is not an error worth surfacing: the room
-      // shows its own "click to join playback" affordance, and throwing here
-      // would abort the sync loop that produced the call.
+      // Already silent, or the user turned the sound back on deliberately —
+      // either way a second attempt would not be any more permitted.
+      if (video.muted || this.#blocked || this.#destroyed) return;
+
+      this.#blocked = true;
+      video.muted = true;
+      try {
+        await video.play();
+        this.#events.onAudioBlocked?.();
+      } catch {
+        // Refused even muted: something other than autoplay policy is wrong,
+        // and the element's `error` event is what will explain it. Throwing
+        // here would abort the sync loop that produced the call.
+        video.muted = false;
+        this.#blocked = false;
+      }
     }
   }
 
@@ -355,6 +383,9 @@ export class MediaEngine implements PlayerEngine {
   }
 
   setMuted(muted: boolean): void {
+    // Turning the sound back on is what clears the block, so a later corrective
+    // play() does not immediately mute the viewer again.
+    if (!muted) this.#blocked = false;
     this.#video.muted = muted;
   }
 

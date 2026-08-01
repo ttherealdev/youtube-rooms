@@ -84,6 +84,22 @@ export interface EngineEvents {
   /** The user pressed play/pause in the player's own chrome. */
   onIntentPlay?: () => void;
   onIntentPause?: () => void;
+  /**
+   * Playback could only be started silently.
+   *
+   * Browsers refuse to begin *audible* playback that no gesture asked for, and
+   * the room starts playback from the sync loop rather than from a click — so
+   * every viewer who did not press play themselves hits this. Each embed
+   * reports the refusal differently, or not at all: a `<video>` rejects its
+   * play promise, while the YouTube and Twitch players simply sit there showing
+   * their own click-to-play artwork with no callback of any kind.
+   *
+   * Engines recover by muting and trying again, which browsers do allow, then
+   * fire this so the room can offer the sound back. Without it a viewer sees a
+   * still frame and a play button that the room's own click-lid swallows, with
+   * no way out — which is exactly the Twitch bug this was written for.
+   */
+  onAudioBlocked?: () => void;
   /** Buffering state changed, so the UI can show a spinner. */
   onBufferingChange?: (buffering: boolean) => void;
 }

@@ -2,6 +2,14 @@ import type { MediaSource } from '@playercn/protocol';
 import { type EngineEvents, type PlayerEngine, usableDuration } from './engine';
 
 /**
+ * How long to give `play()` before concluding the browser refused it.
+ *
+ * The embed reports a refusal by doing nothing — no event, no error — and
+ * drawing its own click-to-play artwork over the video instead.
+ */
+const AUTOPLAY_GRACE_MS = 1200;
+
+/**
  * The Twitch adapter.
  *
  * Twitch will not play outside its own embed — there is no manifest URL a
@@ -24,6 +32,18 @@ export class TwitchEngine implements PlayerEngine {
   #destroyed = false;
   #buffering = true;
   #announced = false;
+
+  #timers = new Set<ReturnType<typeof setTimeout>>();
+  /** Set once the engine has muted itself to get past autoplay policy. */
+  #blocked = false;
+  /** An autoplay check is already outstanding; the sync loop must not add more. */
+  #verifying = false;
+
+  /** Renditions, newest list wins. Twitch names them `1080p60`, `chunked`, … */
+  #qualities: string[] = [];
+  /** Menu label to the group name the embed's `setQuality` expects. */
+  #groups = new Map<string, string>();
+  #pinned: string | null = null;
 
   /** Commands issued before the player existed, replayed on ready. */
   #pending: { playing: boolean; position: number | null; volume: number; muted: boolean } = {
@@ -90,6 +110,10 @@ export class TwitchEngine implements PlayerEngine {
 
       const duration = usableDuration(player.getDuration?.());
       if (duration !== null) this.#events.onDurationChange?.(duration);
+
+      // Renditions only exist once a stream has been selected, and the embed
+      // offers no event for the moment they appear.
+      this.#readQualities();
     });
 
     player.addEventListener('pause', () => this.#events.onIntentPause?.());
@@ -121,8 +145,78 @@ export class TwitchEngine implements PlayerEngine {
     player.setVolume(this.#pending.volume);
     player.setMuted(this.#pending.muted);
     if (this.#pending.position !== null) player.seek(this.#pending.position);
-    if (this.#pending.playing) player.play();
+    if (this.#pending.playing) this.#start();
     else player.pause();
+  }
+
+  #after(ms: number, run: () => void): void {
+    const id = setTimeout(() => {
+      this.#timers.delete(id);
+      if (!this.#destroyed) run();
+    }, ms);
+    this.#timers.add(id);
+  }
+
+  /**
+   * Start playing, working around the browser's autoplay policy.
+   *
+   * This is the bug that made a live Twitch channel look like a still image.
+   * The room presses play on everyone's behalf, so for every viewer who did not
+   * click it themselves the call is an unprompted *audible* start, which
+   * browsers refuse. Twitch answers a refusal by drawing its own play button
+   * over the video and telling the page nothing — while the room's click-lid
+   * sits on top of that button and swallows the click meant for it. The result
+   * was a frozen frame, a working-looking pause icon, and no way out.
+   *
+   * Muting is always permitted, so a refusal is retried silently and the room
+   * is told to offer the sound back.
+   */
+  #start(): void {
+    const player = this.#player;
+    if (!player) return;
+
+    // The sync loop calls play() on every tick, so already-playing is the
+    // common path. Returning early also stops each tick queueing its own check.
+    if (player.isPaused?.() === false) return;
+
+    player.play();
+    if (this.#blocked || this.#verifying) return;
+
+    this.#verifying = true;
+    this.#after(AUTOPLAY_GRACE_MS, () => {
+      this.#verifying = false;
+      const current = this.#player;
+      // Still meant to be playing, and demonstrably is not.
+      if (!this.#pending.playing || !current) return;
+      if (current.isPaused?.() !== true) return;
+
+      this.#blocked = true;
+      current.setMuted(true);
+      current.play();
+      this.#events.onAudioBlocked?.();
+    });
+  }
+
+  #readQualities(): void {
+    const options = this.#player?.getQualities?.() ?? [];
+
+    const labels: string[] = [];
+    const groups = new Map<string, string>();
+    for (const option of options) {
+      const group = option.group;
+      if (!group || group === 'auto') continue;
+      // `chunked` is Twitch's name for the source rendition; everything else
+      // already reads as a resolution. Both arrive best-first.
+      const label = group === 'chunked' ? 'Source' : (option.name ?? group);
+      if (groups.has(label)) continue;
+      groups.set(label, group);
+      labels.push(label);
+    }
+
+    if (labels.join('|') === this.#qualities.join('|')) return;
+    this.#qualities = labels;
+    this.#groups = groups;
+    this.#events.onQualitiesChange?.();
   }
 
   #setBuffering(next: boolean): void {
@@ -149,9 +243,34 @@ export class TwitchEngine implements PlayerEngine {
     return this.#player !== null;
   }
 
+  qualities(): string[] {
+    return this.#qualities;
+  }
+
+  /** The pinned rendition, or null while Twitch is choosing adaptively. */
+  quality(): string | null {
+    return this.#pinned;
+  }
+
+  setQuality(quality: string | null): void {
+    const player = this.#player;
+    if (!player) return;
+
+    if (quality === null) {
+      this.#pinned = null;
+      player.setQuality?.('auto');
+      return;
+    }
+
+    const group = this.#groups.get(quality);
+    if (!group) return;
+    this.#pinned = quality;
+    player.setQuality?.(group);
+  }
+
   play(): void {
     this.#pending.playing = true;
-    this.#player?.play();
+    this.#start();
   }
 
   pause(): void {
@@ -180,11 +299,16 @@ export class TwitchEngine implements PlayerEngine {
 
   setMuted(muted: boolean): void {
     this.#pending.muted = muted;
+    // Turning the sound back on is what clears the block, so a later corrective
+    // play() does not immediately mute the viewer again.
+    if (!muted) this.#blocked = false;
     this.#player?.setMuted(muted);
   }
 
   destroy(): void {
     this.#destroyed = true;
+    for (const id of this.#timers) clearTimeout(id);
+    this.#timers.clear();
     this.#player?.destroy?.();
     this.#player = null;
   }
@@ -207,6 +331,14 @@ export function parseTwitch(url: string): { kind: 'channel' | 'video'; id: strin
   }
 }
 
+/** One entry of the embed's `getQualities()`. */
+interface TwitchQuality {
+  /** The value `setQuality` expects: `1080p60`, `chunked`, `auto`, … */
+  group?: string;
+  /** The display name, which is usually the group with a nicer `Source`. */
+  name?: string;
+}
+
 interface TwitchPlayer {
   play(): void;
   pause(): void;
@@ -215,6 +347,10 @@ interface TwitchPlayer {
   setMuted(muted: boolean): void;
   getCurrentTime(): number;
   getDuration?(): number;
+  /** The only way to tell that a `play()` was refused: the embed is silent. */
+  isPaused?(): boolean;
+  getQualities?(): TwitchQuality[];
+  setQuality?(group: string): void;
   addEventListener(event: string, handler: () => void): void;
   destroy?(): void;
 }
