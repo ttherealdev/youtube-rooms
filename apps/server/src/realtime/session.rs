@@ -394,7 +394,17 @@ impl Session {
             // Reject an intent computed against a timeline we have already
             // moved past. Without this, a laggy client's "pause" can undo a
             // seek that happened after it decided to send.
-            if client_version < timeline.version {
+            //
+            // Only for intents that are *relative* to the current playback
+            // state. "Play this queue item", "next" and "previous" name what
+            // they want outright, so a newer timeline does not invalidate
+            // them — and applying the guard to those made the queue unusable
+            // exactly when the timeline churns most, which is while something
+            // is starting up. The buttons looked dead.
+            if changes_source(&action) {
+                // Intentionally empty: nothing about a newer timeline can make
+                // "play that one" mean something different.
+            } else if client_version < timeline.version {
                 drop(state);
                 self.reply_error(
                     ErrorCode::StaleVersion,
@@ -1217,6 +1227,18 @@ impl Session {
 
         Ok(())
     }
+}
+
+/// Does this intent replace what is playing, rather than adjust it?
+///
+/// The distinction matters for the staleness guard: an adjustment is only
+/// meaningful against the timeline the sender was looking at, but a
+/// replacement names its target and stays valid however far the room has moved.
+fn changes_source(action: &SyncAction) -> bool {
+    matches!(
+        action,
+        SyncAction::Next | SyncAction::Previous | SyncAction::PlayNow { .. }
+    )
 }
 
 #[derive(Debug, Clone, Copy)]

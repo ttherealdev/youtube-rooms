@@ -25,6 +25,25 @@ export interface PlayerEngine {
   /** True once the player can actually accept commands. */
   ready(): boolean;
 
+  /**
+   * True when this source turned out to be a live broadcast.
+   *
+   * Distinct from the *kind* being live-capable. A YouTube URL is a normal
+   * video right up until it is a 24/7 broadcast, and only the player knows
+   * which — so the room has to ask rather than infer it from the link.
+   */
+  live?(): boolean;
+
+  /**
+   * Selectable renditions, best first, or empty when the source offers no
+   * choice. Format is engine-specific and only ever displayed.
+   */
+  qualities?(): string[];
+  /** The rendition in use, or null when the engine is choosing adaptively. */
+  quality?(): string | null;
+  /** `null` restores automatic selection where the engine supports it. */
+  setQuality?(quality: string | null): void;
+
   play(): Promise<void> | void;
   pause(): void;
   seek(seconds: number): void;
@@ -47,8 +66,17 @@ export interface EngineEvents {
    * before any player has decoded a frame.
    */
   onReady?: () => void;
+  /**
+   * The source turned out to be live, whatever its URL suggested.
+   *
+   * The room hides the scrubber and stops correcting position when this
+   * fires — there is no position on a live edge to correct towards.
+   */
+  onLive?: () => void;
   /** Fired once the length becomes known. Live sources never fire it. */
   onDurationChange?: (seconds: number) => void;
+  /** The set of selectable renditions changed, so the menu can rebuild. */
+  onQualitiesChange?: () => void;
   /** Playback reached the end of the media. */
   onEnded?: () => void;
   /** Unrecoverable: the room should show a failure and allow a skip. */

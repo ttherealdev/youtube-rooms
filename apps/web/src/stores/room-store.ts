@@ -42,10 +42,19 @@ interface RoomState {
   reactions: { id: string; userId: string; emoji: string; at: number }[];
   kicked: 'room_closed' | 'banned' | null;
   lastError: string | null;
+  /**
+   * Messages that have arrived since the chat panel was last looked at.
+   *
+   * Kept here rather than in the chat panel because the panel is unmounted
+   * while another tab is open — the count has to survive exactly the period it
+   * is counting.
+   */
+  unreadChat: number;
 
   apply: (message: ServerMessage) => void;
   setConnection: (state: RoomState['connection']) => void;
   dismissReaction: (id: string) => void;
+  markChatRead: () => void;
   reset: () => void;
 }
 
@@ -66,6 +75,7 @@ const initial = {
   reactions: [],
   kicked: null,
   lastError: null,
+  unreadChat: 0,
 };
 
 export const useRoomStore = create<RoomState>((set, get) => ({
@@ -73,6 +83,7 @@ export const useRoomStore = create<RoomState>((set, get) => ({
 
   setConnection: (connection) => set({ connection }),
   dismissReaction: (id) => set((s) => ({ reactions: s.reactions.filter((r) => r.id !== id) })),
+  markChatRead: () => set({ unreadChat: 0 }),
   reset: () => set({ ...initial, typing: new Set() }),
 
   apply: (message) => {
@@ -133,7 +144,12 @@ export const useRoomStore = create<RoomState>((set, get) => ({
         break;
 
       case 'chat_message':
-        set((s) => ({ messages: appendMessage(s.messages, message.message) }));
+        set((s) => ({
+          messages: appendMessage(s.messages, message.message),
+          // Your own message is not news, and neither is the echo of the
+          // optimistic bubble you are already looking at.
+          unreadChat: message.message.author.id === s.self?.id ? s.unreadChat : s.unreadChat + 1,
+        }));
         break;
 
       case 'chat_typing':
@@ -263,4 +279,5 @@ export const useConnection = () => useRoomStore((s) => s.connection);
 export const useQueue = () => useRoomStore(useShallow((s) => s.queue));
 export const useParticipants = () => useRoomStore(useShallow((s) => s.participants));
 export const useMessages = () => useRoomStore(useShallow((s) => s.messages));
+export const useUnreadChat = () => useRoomStore((s) => s.unreadChat);
 export const useSkipVotes = () => useRoomStore(useShallow((s) => s.skipVotes));

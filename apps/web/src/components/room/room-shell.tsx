@@ -21,7 +21,7 @@ import { asThemeKey, asThemeMode } from '~/lib/themes';
 import { cn } from '~/lib/utils';
 import type { PlayerEngine } from '~/realtime/player/engine';
 import { RoomSocket } from '~/realtime/socket';
-import { useConnection, usePermissions, useRoomStore } from '~/stores/room-store';
+import { useConnection, usePermissions, useRoomStore, useUnreadChat } from '~/stores/room-store';
 
 /**
  * The room.
@@ -45,6 +45,8 @@ export function RoomShell({ slug }: { slug: string }) {
   const room = useRoomStore((s) => s.room);
   const kicked = useRoomStore((s) => s.kicked);
   const permissions = usePermissions();
+  const unread = useUnreadChat();
+  const markChatRead = useRoomStore((s) => s.markChatRead);
 
   // The room id is not in the URL — the slug is — so it has to be resolved
   // before a socket can be opened.
@@ -81,6 +83,13 @@ export function RoomShell({ slug }: { slug: string }) {
   }, [roomId, apply, setConnection, reset]);
 
   useRoomTheme(room?.settings.theme, room?.settings.themeMode);
+  useErrorToasts();
+
+  // Opening the chat is what marks it read; the count keeps rising while any
+  // other panel is in front of it.
+  useEffect(() => {
+    if (panel === 'chat' && unread > 0) markChatRead();
+  }, [panel, unread, markChatRead]);
 
   // Keyboard control. The hook was written for the previous shell and lost its
   // only caller in the framework move, which quietly removed every shortcut in
@@ -149,7 +158,10 @@ export function RoomShell({ slug }: { slug: string }) {
 
   return (
     <div className="flex h-dvh flex-col">
-      <header className="flex items-center gap-3 border-b px-4 py-2.5">
+      {/* Theatre mode reclaims the header's height for the picture. The room
+          name is still reachable — it is in the player's own title line — so
+          nothing is lost but chrome. */}
+      <header className={cn('flex items-center gap-3 border-b px-4 py-2.5', theatre && 'hidden')}>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-medium">{room?.name ?? 'Loading…'}</h1>
           <p className="truncate text-xs text-muted-foreground">
@@ -176,27 +188,28 @@ export function RoomShell({ slug }: { slug: string }) {
         </Button>
       </header>
 
-      {/* Theatre mode drops to one column and lets the player have the width;
-          the panels move underneath rather than disappearing, because a room
-          where you cannot see the chat is a worse room, not a cinema. */}
+      {/* Theatre keeps the two columns — the whole point is watching *with*
+          people — but gives the player every pixel the chat does not need, and
+          lets it fill the height instead of sitting in a padded card. */}
       <div
         className={cn(
           'grid min-h-0 flex-1',
-          theatre ? 'grid-rows-[auto_minmax(0,1fr)]' : 'lg:grid-cols-[1fr_380px]',
+          theatre ? 'grid-cols-[minmax(0,1fr)_320px]' : 'lg:grid-cols-[1fr_380px]',
         )}
       >
         <main
           ref={playerRef}
-          className={cn('min-h-0 overflow-y-auto', theatre ? 'bg-black p-0' : 'p-4')}
+          className={cn(
+            'min-h-0',
+            theatre ? 'grid place-items-center overflow-hidden bg-black' : 'overflow-y-auto p-4',
+          )}
         >
-          <div className={cn(theatre && 'mx-auto max-h-[72dvh] w-full max-w-[min(100%,160dvh)]')}>
-            <Player
-              socket={socket}
-              onEngine={setEngine}
-              theatre={theatre}
-              onTheatre={() => setTheatre((on) => !on)}
-            />
-          </div>
+          <Player
+            socket={socket}
+            onEngine={setEngine}
+            theatre={theatre}
+            onTheatre={() => setTheatre((on) => !on)}
+          />
         </main>
 
         <aside
@@ -208,9 +221,18 @@ export function RoomShell({ slug }: { slug: string }) {
             className="flex min-h-0 flex-1 flex-col"
           >
             <TabsList className="m-2 shrink-0">
-              <TabsTrigger value="chat">
+              <TabsTrigger value="chat" className="relative">
                 <MessageSquare className="size-4" />
                 <span className="hidden sm:inline">Chat</span>
+                {unread > 0 && panel !== 'chat' ? (
+                  <span
+                    role="status"
+                    className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground tabular-nums"
+                  >
+                    {unread > 99 ? '99+' : unread}
+                    <span className="sr-only"> unread messages</span>
+                  </span>
+                ) : null}
               </TabsTrigger>
               <TabsTrigger value="queue">
                 <Video className="size-4" />
@@ -229,7 +251,7 @@ export function RoomShell({ slug }: { slug: string }) {
             </TabsList>
 
             <TabsContent value="chat" className="min-h-0 flex-1">
-              <ChatPanel socket={socket} />
+              <ChatPanel socket={socket} inputRef={chatInputRef} />
             </TabsContent>
             <TabsContent value="queue" className="min-h-0 flex-1">
               <QueuePanel socket={socket} />
@@ -287,6 +309,25 @@ function useShortcutActions({
     }),
     [focusChat, setPanel, playerRef, setTheatre],
   );
+}
+
+/**
+ * Show the server's refusals.
+ *
+ * Every rejected intent already arrived and was stored, and nothing ever
+ * rendered it — so "you cannot control playback here", "that room is full" and
+ * "you're doing that too quickly" all presented identically, as a button that
+ * did nothing. Reads the error and clears it, so the same message can be shown
+ * again the next time it happens.
+ */
+function useErrorToasts(): void {
+  const lastError = useRoomStore((s) => s.lastError);
+
+  useEffect(() => {
+    if (!lastError) return;
+    toast.error(lastError);
+    useRoomStore.setState({ lastError: null });
+  }, [lastError]);
 }
 
 /**

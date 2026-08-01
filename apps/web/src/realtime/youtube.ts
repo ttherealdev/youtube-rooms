@@ -18,7 +18,18 @@ export const PlayerState = {
 
 export type PlayerStateValue = (typeof PlayerState)[keyof typeof PlayerState];
 
+export interface VideoData {
+  video_id?: string;
+  title?: string;
+  /** True for a live broadcast, including one with a DVR window. */
+  isLive?: boolean;
+}
+
 export interface YouTubePlayer {
+  getVideoData?(): VideoData | undefined;
+  getAvailableQualityLevels?(): string[];
+  getPlaybackQuality?(): string;
+  setPlaybackQuality?(quality: string): void;
   playVideo(): void;
   pauseVideo(): void;
   seekTo(seconds: number, allowSeekAhead: boolean): void;

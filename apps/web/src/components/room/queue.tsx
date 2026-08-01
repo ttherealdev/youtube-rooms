@@ -32,6 +32,7 @@ export function QueuePanel({ socket }: { socket: RoomSocket | null }) {
   const timeline = useTimeline();
   const permissions = usePermissions();
   const canManage = permissions?.canManageQueue ?? false;
+  const canControl = permissions?.canControlPlayback ?? false;
 
   return (
     <div className="flex h-full flex-col">
@@ -80,6 +81,7 @@ export function QueuePanel({ socket }: { socket: RoomSocket | null }) {
                 key={item.id}
                 item={item}
                 canManage={canManage}
+                canPlay={canControl}
                 playing={timeline?.queueItemId === item.id}
                 onPlay={() =>
                   timeline &&
@@ -102,12 +104,16 @@ export function QueuePanel({ socket }: { socket: RoomSocket | null }) {
 function QueueRow({
   item,
   canManage,
+  canPlay,
   playing,
   onPlay,
   onRemove,
 }: {
   item: QueueItem;
   canManage: boolean;
+  /** Distinct from `canManage`: editing the queue and driving playback are
+      separate permissions, and this button does the latter. */
+  canPlay: boolean;
   playing: boolean;
   onPlay: () => void;
   onRemove: () => void;
@@ -145,17 +151,53 @@ function QueueRow({
         </p>
       </div>
 
-      {canManage ? (
+      {canManage || canPlay ? (
         <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-          <Button variant="ghost" size="icon-sm" aria-label="Play now" onClick={onPlay}>
-            <Play className="size-3.5" />
-          </Button>
-          <Button variant="ghost" size="icon-sm" aria-label="Remove" onClick={onRemove}>
-            <X className="size-3.5" />
-          </Button>
+          {canPlay ? (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Play now"
+              title="Play now"
+              onClick={onPlay}
+            >
+              <Play className="size-3.5" />
+            </Button>
+          ) : null}
+          {canManage ? (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Remove"
+              title="Remove"
+              onClick={onRemove}
+            >
+              <X className="size-3.5" />
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * What the room accepts, stated where it is being asked for.
+ *
+ * "Paste a link" is only useful advice if you already know which links work.
+ * Listing them at the point of entry is cheaper than a failed import and an
+ * error message afterwards.
+ */
+function SupportedList({ groups }: { groups: readonly (readonly [string, string])[] }) {
+  return (
+    <dl className="mt-3 space-y-1.5 rounded-lg border bg-muted/40 p-3">
+      {groups.map(([term, detail]) => (
+        <div key={term} className="grid grid-cols-[6.5rem_1fr] gap-2 text-xs">
+          <dt className="font-medium">{term}</dt>
+          <dd className="text-muted-foreground">{detail}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -187,9 +229,21 @@ function AddSourceDialog({ socket, disabled }: { socket: RoomSocket | null; disa
           <DialogHeader>
             <DialogTitle>Open media</DialogTitle>
             <DialogDescription>
-              A YouTube link, a direct video or audio URL, or an HLS/DASH stream.
+              Paste a link and the room works out how to play it.
             </DialogDescription>
           </DialogHeader>
+
+          <SupportedList
+            groups={[
+              [
+                'Video sites',
+                'YouTube (video, short or live) · Twitch channel or VOD · Kick channel',
+              ],
+              ['Direct files', 'MP4 · WebM · MKV · MOV · MP3 · M4A — any URL a browser can decode'],
+              ['Live streams', 'HLS (.m3u8) and DASH (.mpd) manifests'],
+              ['Cloud links', 'Google Drive and Dropbox share links are converted automatically'],
+            ]}
+          />
 
           <div className="space-y-2 py-4">
             <Label htmlFor="source-url">Address</Label>
@@ -203,7 +257,8 @@ function AddSourceDialog({ socket, disabled }: { socket: RoomSocket | null; disa
               spellCheck={false}
             />
             <p className="text-xs text-muted-foreground">
-              Streams must allow playback from another site; some do not.
+              The scheme is optional — <code className="font-mono">example.com/clip.mp4</code>{' '}
+              works. Some servers refuse playback from another site; those cannot be played here.
             </p>
           </div>
 
@@ -255,9 +310,17 @@ function ImportPlaylistDialog({
           <DialogHeader>
             <DialogTitle>Import a playlist</DialogTitle>
             <DialogDescription>
-              Paste an M3U, M3U8 or PLS list and every entry on it is added to the queue.
+              Every entry on the list is added to the queue at once.
             </DialogDescription>
           </DialogHeader>
+
+          <SupportedList
+            groups={[
+              ['Playlists', 'M3U and M3U8 (IPTV channel lists) · PLS'],
+              ['Exports', 'XSPF from VLC or Clementine · ASX from Windows Media Player'],
+              ['Limits', 'Up to 500 entries per import; anything longer is truncated'],
+            ]}
+          />
 
           <div className="space-y-2 py-4">
             <Label htmlFor="playlist-url">Playlist URL</Label>

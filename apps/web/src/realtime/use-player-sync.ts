@@ -61,6 +61,16 @@ export function usePlayerSync(
       return;
     }
 
+    // A live edge has no position to converge on. Correcting towards one
+    // produces the seek-buffer-seek loop that made live YouTube unwatchable:
+    // the timeline names a point in a DVR window the player is not obliged to
+    // honour, the player lands somewhere else, and the loop tries again.
+    if (player.live?.()) {
+      if (tl.paused) player.pause();
+      else player.play();
+      return;
+    }
+
     const target = positionAt(tl, sock.clock.serverNow());
     const observed = player.currentTime();
     const { confident } = sock.clock.status;
@@ -124,10 +134,11 @@ export function usePlayerSync(
   // Authoritative changes, applied on arrival. `version` is the right
   // dependency rather than the timeline object: the store hands back a new
   // object on every update, but the version is what says the room really moved.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the version *is* the trigger
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !engine) return;
     tickRef.current();
-  }, [enabled, timeline?.version, engine]);
+  }, [enabled, engine, timeline?.version]);
 
   // Drift *reporting* is a separate, much slower loop: it feeds the server's
   // SLO histogram and has nothing to do with correcting this client.

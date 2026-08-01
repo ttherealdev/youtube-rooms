@@ -26,6 +26,18 @@ export class MediaEngine implements PlayerEngine {
   #streaming: { destroy: () => void } | null = null;
   #detach: Array<() => void> = [];
 
+  /**
+   * Rendition control, populated only by the adaptive backends.
+   *
+   * A plain file has exactly one rendition, so the menu stays hidden for it
+   * rather than offering a choice of one.
+   */
+  #renditions: { labels: string[]; get: () => string | null; set: (q: string | null) => void } = {
+    labels: [],
+    get: () => null,
+    set: () => undefined,
+  };
+
   constructor(video: HTMLVideoElement, source: MediaSource, events: EngineEvents = {}) {
     this.#video = video;
     this.#events = events;
@@ -155,6 +167,26 @@ export class MediaEngine implements PlayerEngine {
         }
       });
 
+      // Renditions become known when the manifest parses, not before.
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        this.#renditions = {
+          labels: hls.levels.map(describeLevel),
+          get: () => {
+            const level = hls.levels[hls.currentLevel];
+            // A negative index is hls.js reporting "I am choosing", which is
+            // what a null rendition means to the room.
+            return hls.currentLevel < 0 || !level ? null : describeLevel(level);
+          },
+          set: (quality) => {
+            hls.currentLevel =
+              quality === null
+                ? -1
+                : hls.levels.findIndex((level) => describeLevel(level) === quality);
+          },
+        };
+        this.#events.onQualitiesChange?.();
+      });
+
       hls.loadSource(source.url);
       hls.attachMedia(video);
       return;
@@ -167,6 +199,33 @@ export class MediaEngine implements PlayerEngine {
       const player = dashjs.MediaPlayer().create();
       player.initialize(video, source.url, false);
       this.#streaming = { destroy: () => player.destroy() };
+
+      // dash.js v5 renamed the bitrate list to representations; the older
+      // `getBitrateInfoListFor` no longer exists.
+      player.on('streamInitialized', () => {
+        const label = (r: { height: number; bitrateInKbit: number }) =>
+          r.height ? `${r.height}p` : `${Math.round(r.bitrateInKbit)} kbps`;
+        const tracks = player.getRepresentationsByType('video') ?? [];
+
+        this.#renditions = {
+          labels: tracks.map(label),
+          get: () => {
+            const current = player.getCurrentRepresentationForType('video');
+            return current ? label(current) : null;
+          },
+          set: (quality) => {
+            // Picking a rendition means switching adaptive selection off; the
+            // player would otherwise override the choice on the next segment.
+            player.updateSettings({
+              streaming: { abr: { autoSwitchBitrate: { video: quality === null } } },
+            });
+            const index = tracks.findIndex((track) => label(track) === quality);
+            if (index >= 0) player.setRepresentationForTypeByIndex('video', index);
+          },
+        };
+        this.#events.onQualitiesChange?.();
+      });
+
       return;
     }
 
@@ -187,6 +246,29 @@ export class MediaEngine implements PlayerEngine {
 
   ready(): boolean {
     return this.#ready;
+  }
+
+  /**
+   * A manifest with no known duration is a live edge.
+   *
+   * `<video>.duration` is `Infinity` for live HLS, which `usableDuration`
+   * already reduces to null — so this needs no extra bookkeeping, only the
+   * observation that "adaptive source, no length" means live.
+   */
+  live(): boolean {
+    return this.kind !== 'file' && this.duration() === null;
+  }
+
+  qualities(): string[] {
+    return this.#renditions.labels;
+  }
+
+  quality(): string | null {
+    return this.#renditions.get();
+  }
+
+  setQuality(quality: string | null): void {
+    this.#renditions.set(quality);
   }
 
   async play(): Promise<void> {
@@ -235,6 +317,17 @@ export class MediaEngine implements PlayerEngine {
     this.#video.removeAttribute('src');
     this.#video.load();
   }
+}
+
+/**
+ * A human label for an HLS level.
+ *
+ * Height alone is what people recognise; bitrate is the tiebreaker for the
+ * streams that publish two renditions at the same resolution.
+ */
+function describeLevel(level: { height?: number; bitrate?: number }): string {
+  if (level.height) return `${level.height}p`;
+  return level.bitrate ? `${Math.round(level.bitrate / 1000)} kbps` : 'Auto';
 }
 
 function describeMediaError(code: number | undefined): string {

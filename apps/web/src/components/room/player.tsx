@@ -7,12 +7,14 @@ import {
   Minimize,
   MoreVertical,
   Pause,
+  PictureInPicture2,
   Play,
   RectangleHorizontal,
   Repeat,
   Repeat1,
   RotateCcw,
   RotateCw,
+  Settings2,
   SkipBack,
   SkipForward,
   Volume1,
@@ -96,19 +98,25 @@ export function Player({
   const [position, setPosition] = useState(0);
   const [scrub, setScrub] = useState<number | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  // Discovered by the engine rather than implied by the URL: a YouTube link is
+  // an ordinary video right up until it is a 24/7 broadcast.
+  const [engineLive, setEngineLive] = useState(false);
+  const [qualities, setQualities] = useState<string[]>([]);
 
   const source = timeline?.source ?? null;
   // The engine's identity is the source, not the timeline: rebuilding on every
   // pause would reload the video each time anyone touched the controls.
   const sourceKey = source ? `${source.kind}:${source.url}` : null;
   const canControl = permissions?.canControlPlayback ?? false;
-  const live = source ? mayBeLive(source) : false;
+  const live = (source ? mayBeLive(source) : false) || engineLive;
   // Which of the two mounts this source draws into: a third-party iframe, or
   // the plain media element.
   const embedded = source ? EMBEDDED_KINDS.has(source.kind) : false;
-  // Kick publishes an embed but no API for it, so the room genuinely cannot
-  // drive playback. The controls say so rather than pretending: a play button
-  // that does nothing is worse than one that is visibly unavailable.
+  // Kick publishes an embed but no API for it, so the room cannot drive
+  // *transport* — play, pause, seek, volume. It can still change what is
+  // playing, because that replaces the whole player. Conflating the two
+  // stranded the room: a Kick stream disabled Next and there was no way out of
+  // it except leaving.
   const drivable = source?.kind !== 'kick';
   const awaiting = timeline?.awaitingStart ?? false;
   const paused = timeline?.paused ?? true;
@@ -143,6 +151,8 @@ export function Player({
 
     setError(null);
     setBuffering(true);
+    setEngineLive(false);
+    setQualities([]);
 
     const events = {
       onBufferingChange: setBuffering,
@@ -158,6 +168,8 @@ export function Player({
         // the first answer.
         socket?.send({ t: 'playback_ready', version: versionRef.current });
       },
+      onLive: () => setEngineLive(true),
+      onQualitiesChange: () => setQualities(engineRef.current?.qualities?.() ?? []),
       onDurationChange: (seconds: number) => {
         // Only the room's authority learns durations for us; anyone able to
         // control playback may report, and the server keeps the first.
@@ -258,7 +270,12 @@ export function Player({
       onPointerMove={() => wake()}
       onPointerLeave={() => wake(false)}
       className={cn(
-        'group/player relative isolate aspect-video w-full overflow-hidden rounded-xl bg-black select-none',
+        'group/player relative isolate aspect-video overflow-hidden bg-black select-none',
+        // Normally the player is a card in a scrolling column. In theatre it is
+        // the column: it takes the full height and derives its width from the
+        // ratio, so the picture is as large as the space allows without ever
+        // being cropped or letterboxed twice.
+        theatre ? 'h-full max-h-full w-auto max-w-full' : 'w-full rounded-xl',
         !visible && 'cursor-none',
       )}
     >
@@ -383,7 +400,7 @@ export function Player({
 
             <ControlButton
               label="Previous"
-              disabled={!canControl || !drivable}
+              disabled={!canControl}
               onClick={() => send({ kind: 'previous' })}
             >
               <SkipBack className="size-5" />
@@ -391,7 +408,7 @@ export function Player({
 
             <ControlButton
               label="Next"
-              disabled={!canControl || !drivable}
+              disabled={!canControl}
               onClick={() => send({ kind: 'next' })}
             >
               <SkipForward className="size-5" />
@@ -412,18 +429,55 @@ export function Player({
               }}
             />
 
-            <VolumeControl
-              muted={muted}
-              volume={volume}
-              onMute={() => {
-                const next = !muted;
-                setMuted(next);
-                engine?.setMuted(next);
-              }}
-              onVolume={applyVolume}
-            />
+            {drivable ? (
+              <VolumeControl
+                muted={muted}
+                volume={volume}
+                onMute={() => {
+                  const next = !muted;
+                  setMuted(next);
+                  engine?.setMuted(next);
+                }}
+                onVolume={applyVolume}
+              />
+            ) : null}
 
-            {live ? null : (
+            {/* Only shown when the source actually offers a choice — a plain
+                file has one rendition, and a menu of one is noise. Quality is
+                a local decision, like volume: one person's connection must not
+                set everybody's bitrate. */}
+            {qualities.length > 1 ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label="Quality"
+                      className="h-9 min-w-9 px-2 text-xs font-medium text-white hover:bg-white/15 hover:text-white"
+                    >
+                      <Settings2 className="size-4" />
+                    </Button>
+                  }
+                />
+                <DropdownMenuContent align="end">
+                  <DropdownMenuGroup>
+                    <DropdownMenuLabel>Quality</DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => engine?.setQuality?.(null)}>
+                      Auto
+                    </DropdownMenuItem>
+                    {qualities.map((option) => (
+                      <DropdownMenuItem key={option} onClick={() => engine?.setQuality?.(option)}>
+                        {option}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
+
+            {live || !drivable ? null : (
               <DropdownMenu>
                 <DropdownMenuTrigger
                   render={
@@ -467,6 +521,22 @@ export function Player({
                 ) : (
                   <Frame className="size-5" />
                 )}
+              </ControlButton>
+            ) : null}
+
+            {/* Only a real <video> can be popped out. The embeds render inside
+                a cross-origin iframe, which the API cannot reach into. */}
+            {!embedded && typeof document !== 'undefined' && document.pictureInPictureEnabled ? (
+              <ControlButton
+                label="Picture in picture"
+                onClick={() => {
+                  const video = videoRef.current;
+                  if (!video) return;
+                  if (document.pictureInPictureElement) void document.exitPictureInPicture();
+                  else void video.requestPictureInPicture().catch(() => undefined);
+                }}
+              >
+                <PictureInPicture2 className="size-5" />
               </ControlButton>
             ) : null}
 

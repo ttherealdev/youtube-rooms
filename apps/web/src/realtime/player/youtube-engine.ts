@@ -25,6 +25,16 @@ export class YouTubeEngine implements PlayerEngine {
   #events: EngineEvents;
   #destroyed = false;
   #buffering = false;
+  /**
+   * Whether this is a live broadcast.
+   *
+   * Load-bearing. `getDuration()` on a live stream returns the length of the
+   * DVR window, which grows without bound — a stream that had been up for
+   * months reported 3563 hours, the room adopted that as the video's length,
+   * and the scrubber and the correction loop then fought each other over a
+   * position that meant nothing. Live streams must report *no* duration.
+   */
+  #live = false;
 
   /** Commands issued before the player existed, replayed on ready. */
   #pending: { playing: boolean; position: number | null; rate: number } = {
@@ -66,11 +76,12 @@ export class YouTubeEngine implements PlayerEngine {
             return;
           }
           this.#player = target;
+          this.#live = target.getVideoData?.()?.isLive ?? false;
           this.#applyPending();
           this.#events.onReady?.();
+          if (this.#live) this.#events.onLive?.();
 
-          const duration = usableDuration(target.getDuration());
-          if (duration !== null) this.#events.onDurationChange?.(duration);
+          this.#reportDuration(target);
         },
 
         onStateChange: ({ data, target }) => {
@@ -79,10 +90,12 @@ export class YouTubeEngine implements PlayerEngine {
           if (data === PlayerState.Ended) this.#events.onEnded?.();
           if (data === PlayerState.Playing) {
             this.#events.onIntentPlay?.();
-            // Duration is often still zero at `onReady` and only becomes real
-            // once playback actually starts.
-            const duration = usableDuration(target.getDuration());
-            if (duration !== null) this.#events.onDurationChange?.(duration);
+            // Both of these are often still wrong at `onReady` and only become
+            // true once playback actually starts — `isLive` included.
+            const wasLive = this.#live;
+            this.#live = target.getVideoData?.()?.isLive ?? this.#live;
+            if (this.#live && !wasLive) this.#events.onLive?.();
+            this.#reportDuration(target);
           }
           if (data === PlayerState.Paused) this.#events.onIntentPause?.();
         },
@@ -108,6 +121,19 @@ export class YouTubeEngine implements PlayerEngine {
     else player.pauseVideo();
   }
 
+  /**
+   * Report the length, unless there is no meaningful length to report.
+   *
+   * A live broadcast's `getDuration()` is its DVR window, not the length of
+   * anything: reporting it makes the room believe the stream ends at an
+   * arbitrary future point and auto-advance there.
+   */
+  #reportDuration(player: YouTubePlayer): void {
+    if (this.#live) return;
+    const duration = usableDuration(player.getDuration());
+    if (duration !== null) this.#events.onDurationChange?.(duration);
+  }
+
   #setBuffering(next: boolean): void {
     if (this.#buffering === next) return;
     this.#buffering = next;
@@ -119,7 +145,26 @@ export class YouTubeEngine implements PlayerEngine {
   }
 
   duration(): number | null {
+    if (this.#live) return null;
     return usableDuration(this.#player?.getDuration());
+  }
+
+  live(): boolean {
+    return this.#live;
+  }
+
+  qualities(): string[] {
+    return this.#player?.getAvailableQualityLevels?.() ?? [];
+  }
+
+  quality(): string | null {
+    return this.#player?.getPlaybackQuality?.() ?? null;
+  }
+
+  setQuality(quality: string): void {
+    // Advisory on YouTube: the player treats it as a ceiling and still adapts
+    // downwards on a poor connection, which is the behaviour people expect.
+    this.#player?.setPlaybackQuality?.(quality);
   }
 
   buffering(): boolean {
