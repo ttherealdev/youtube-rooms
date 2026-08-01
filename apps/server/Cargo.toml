@@ -43,7 +43,7 @@ rand = "0.9"
 # `rustls-no-provider`: reqwest's `rustls` feature would pull aws-lc-rs while
 # sqlx pulls ring, leaving two providers and no process default. We install
 # ring explicitly instead.
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls-no-provider", "webpki-roots", "gzip"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls-no-provider", "webpki-roots", "gzip", "stream"] }
 
 # --- Utility -----------------------------------------------------------------
 uuid = { version = "1.24", features = ["v4", "v7", "serde"] }

@@ -37,6 +37,121 @@ pub struct Fetched {
     pub body: String,
 }
 
+/// A live upstream response, still streaming.
+pub struct Opened {
+    /// Where the body actually came from, after redirects. Segment URLs inside
+    /// a manifest resolve against this, not the URL originally submitted.
+    pub final_url: String,
+    pub content_type: Option<String>,
+    pub response: reqwest::Response,
+}
+
+/// Open a user-supplied URL for streaming, under the same guard as `fetch_text`.
+///
+/// Separate from `fetch_text` because the relay must not buffer: a video
+/// segment is handed to the client as it arrives, and a live channel never
+/// ends. Everything about how the URL is validated is identical — the SSRF
+/// guard, the pinned address and the hop-by-hop redirect handling are the part
+/// that matters, and neither caller may skip it.
+pub async fn open_stream(url: &str, timeout: Duration) -> Result<Opened, AppError> {
+    let mut current = url.to_string();
+
+    for _ in 0..=MAX_REDIRECTS {
+        let (target, client) = prepare(&current, timeout).await?;
+
+        let response = client.get(target.clone()).send().await.map_err(|error| {
+            tracing::debug!(?error, "stream fetch failed");
+            AppError::BadRequest("Could not reach that stream.".into())
+        })?;
+
+        if response.status().is_redirection() {
+            current = next_hop(&target, &response)?;
+            continue;
+        }
+
+        if !response.status().is_success() {
+            return Err(AppError::BadRequest(format!(
+                "That stream answered with {}.",
+                response.status().as_u16()
+            )));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+
+        return Ok(Opened {
+            final_url: target.to_string(),
+            content_type,
+            response,
+        });
+    }
+
+    Err(AppError::BadRequest(
+        "That stream redirected too many times.".into(),
+    ))
+}
+
+/// Validate a URL and build a client pinned to the address we approved.
+async fn prepare(
+    url: &str,
+    timeout: Duration,
+) -> Result<(reqwest::Url, reqwest::Client), AppError> {
+    let target = reqwest::Url::parse(url)
+        .map_err(|_| AppError::BadRequest("That is not a valid URL.".into()))?;
+
+    match target.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(AppError::BadRequest(
+                "Only http and https URLs can be fetched.".into(),
+            ));
+        }
+    }
+
+    let host = target
+        .host_str()
+        .ok_or_else(|| AppError::BadRequest("That URL has no host.".into()))?
+        .to_string();
+    let port = target
+        .port_or_known_default()
+        .ok_or_else(|| AppError::BadRequest("That URL has no port.".into()))?;
+
+    let address = resolve_public(&host, port).await?;
+
+    let client = reqwest::Client::builder()
+        .resolve(&host, address)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        // Some CDNs serve a different rendition — or refuse outright — to a
+        // client that does not look like a browser.
+        .user_agent("Mozilla/5.0 (compatible; playercn/0.1)")
+        .build()
+        .map_err(|error| {
+            tracing::error!(?error, "failed to build fetch client");
+            AppError::Internal(anyhow::anyhow!("http client"))
+        })?;
+
+    Ok((target, client))
+}
+
+/// Resolve a redirect's `Location` against the URL it came from.
+fn next_hop(target: &reqwest::Url, response: &reqwest::Response) -> Result<String, AppError> {
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::BadRequest("That URL redirected without a destination.".into()))?;
+
+    // Relative redirects are legal and common.
+    Ok(target
+        .join(location)
+        .map_err(|_| AppError::BadRequest("That URL redirected somewhere invalid.".into()))?
+        .to_string())
+}
+
 /// Retrieve a text document from a user-supplied URL.
 pub async fn fetch_text(
     url: &str,
@@ -156,7 +271,7 @@ async fn read_capped(mut response: reqwest::Response, max_bytes: usize) -> Resul
 }
 
 /// Resolve a hostname and return the first publicly routable address.
-async fn resolve_public(host: &str, port: u16) -> Result<SocketAddr, AppError> {
+pub(crate) async fn resolve_public(host: &str, port: u16) -> Result<SocketAddr, AppError> {
     let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
         .map_err(|error| {

@@ -6,6 +6,7 @@
 
 pub mod fetch;
 pub mod playlist;
+pub mod relay;
 pub mod source;
 
 pub use playlist::Parsed;

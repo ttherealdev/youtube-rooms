@@ -1,5 +1,14 @@
 import type { MediaSource } from '@playercn/protocol';
+import { apiUrl, getAccessToken } from '~/lib/api';
 import { type EngineEvents, type PlayerEngine, usableDuration } from './engine';
+
+/** Where the server's stream relay lives. */
+const RELAY_PREFIX = apiUrl('/api/stream/');
+
+/** Point a manifest URL at the relay. */
+function relayUrl(url: string): string {
+  return `${RELAY_PREFIX}manifest?url=${encodeURIComponent(url)}`;
+}
 
 /**
  * Playback for everything that is not YouTube: direct files, HLS and DASH.
@@ -10,9 +19,10 @@ import { type EngineEvents, type PlayerEngine, usableDuration } from './engine';
  * both libraries are imported dynamically, so a room playing a YouTube video
  * never downloads either.
  *
- * The one genuine subtlety is Safari. It plays HLS natively via `src`, and
- * attaching hls.js on top of that fights the built-in implementation, so the
- * native path is preferred wherever it exists.
+ * hls.js is preferred over native HLS everywhere it works, Safari included.
+ * Native playback reports no renditions, cannot be routed through the relay,
+ * and gives the room no way to distinguish a refused fetch from a broken file.
+ * All three matter more than matching the platform player.
  */
 export class MediaEngine implements PlayerEngine {
   readonly kind: MediaSource['kind'];
@@ -119,6 +129,91 @@ export class MediaEngine implements PlayerEngine {
     this.#events.onBufferingChange?.(next);
   }
 
+  /**
+   * Attach hls.js to a URL, optionally through the server's relay.
+   *
+   * The relay exists because most public IPTV streams answer with a fixed
+   * `Access-Control-Allow-Origin` naming their own site — Pluto's sends
+   * `http://pluto.tv` — so the browser refuses the manifest no matter how valid
+   * the link is. Nothing on the client can talk its way past that; only a
+   * same-origin server can fetch it and pass it on.
+   *
+   * Direct is always tried first. A stream that works is played without costing
+   * the server a byte, and only a refusal escalates.
+   */
+  #startHls(Hls: typeof import('hls.js').default, url: string, relayed: boolean): void {
+    const hls = new Hls({
+      // The room is the authority on position, so a large forward buffer just
+      // delays how fast a corrective seek can take effect.
+      maxBufferLength: 30,
+      enableWorker: true,
+      // The relay is authenticated, so its requests need the access token.
+      // Upstream URLs are untouched — sending our token to a third party would
+      // be handing it out.
+      xhrSetup: (xhr: XMLHttpRequest, requestUrl: string) => {
+        if (!requestUrl.startsWith(RELAY_PREFIX)) return;
+        const token = getAccessToken();
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      },
+    });
+    this.#streaming = hls;
+
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (!data.fatal) return;
+
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        // A refused manifest is indistinguishable from an unreachable one at
+        // this layer — the browser deliberately withholds the reason for a
+        // blocked cross-origin response. Retrying through the relay answers
+        // the question by removing the cross-origin part.
+        if (!relayed) {
+          hls.destroy();
+          this.#streaming = null;
+          this.#startHls(Hls, url, true);
+          return;
+        }
+        // Already relayed, so this is the network genuinely failing. Public
+        // streams drop constantly and recover, so keep asking.
+        hls.startLoad();
+        return;
+      }
+
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        hls.recoverMediaError();
+        return;
+      }
+
+      this.#events.onError?.(
+        relayed
+          ? 'This stream could not be played, even through the server.'
+          : 'This stream could not be played.',
+      );
+    });
+
+    // Renditions become known when the manifest parses, not before.
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      this.#renditions = {
+        labels: hls.levels.map(describeLevel),
+        get: () => {
+          const level = hls.levels[hls.currentLevel];
+          // A negative index is hls.js reporting "I am choosing", which is what
+          // a null rendition means to the room.
+          return hls.currentLevel < 0 || !level ? null : describeLevel(level);
+        },
+        set: (quality) => {
+          hls.currentLevel =
+            quality === null
+              ? -1
+              : hls.levels.findIndex((level) => describeLevel(level) === quality);
+        },
+      };
+      this.#events.onQualitiesChange?.();
+    });
+
+    hls.loadSource(relayed ? relayUrl(url) : url);
+    hls.attachMedia(this.#video);
+  }
+
   async #attachSource(source: MediaSource): Promise<void> {
     const video = this.#video;
 
@@ -131,64 +226,23 @@ export class MediaEngine implements PlayerEngine {
     }
 
     if (source.kind === 'hls') {
-      // Safari and iOS play HLS natively. Layering hls.js over that competes
-      // with the platform implementation instead of helping it.
-      if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = source.url;
-        return;
-      }
-
       const { default: Hls } = await import('hls.js');
       if (this.#destroyed) return;
 
+      // hls.js is preferred over native playback wherever it works, including
+      // on Safari. Native HLS reports no renditions, cannot be relayed, and
+      // gives the room no way to tell a refused fetch from a broken file — all
+      // three matter more than matching the platform player.
       if (!Hls.isSupported()) {
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = source.url;
+          return;
+        }
         this.#events.onError?.('This browser cannot play HLS streams.');
         return;
       }
 
-      const hls = new Hls({
-        // The room is the authority on position, so a large forward buffer
-        // just delays how fast a corrective seek can take effect.
-        maxBufferLength: 30,
-        enableWorker: true,
-      });
-      this.#streaming = hls;
-
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (!data.fatal) return;
-        // Network and media errors are frequently transient on public streams;
-        // the library can recover from both if asked. Only give up otherwise.
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          hls.startLoad();
-        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          hls.recoverMediaError();
-        } else {
-          this.#events.onError?.('This stream could not be played.');
-        }
-      });
-
-      // Renditions become known when the manifest parses, not before.
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        this.#renditions = {
-          labels: hls.levels.map(describeLevel),
-          get: () => {
-            const level = hls.levels[hls.currentLevel];
-            // A negative index is hls.js reporting "I am choosing", which is
-            // what a null rendition means to the room.
-            return hls.currentLevel < 0 || !level ? null : describeLevel(level);
-          },
-          set: (quality) => {
-            hls.currentLevel =
-              quality === null
-                ? -1
-                : hls.levels.findIndex((level) => describeLevel(level) === quality);
-          },
-        };
-        this.#events.onQualitiesChange?.();
-      });
-
-      hls.loadSource(source.url);
-      hls.attachMedia(video);
+      this.#startHls(Hls, source.url, false);
       return;
     }
 
@@ -339,9 +393,12 @@ function describeMediaError(code: number | undefined): string {
     case 3:
       return 'This file is corrupt, or uses a codec this browser cannot decode.';
     case 4:
-      // By far the most common real failure: a link that is fine in VLC but
-      // that the browser either cannot decode or cannot fetch cross-origin.
-      return 'This source cannot be played here — the format may be unsupported, or the server may not allow playback from another site.';
+      // By far the most common real failure, and two very different causes
+      // wearing one error code: the browser cannot decode the container, or
+      // the server refused it cross-origin. Streams get a second chance
+      // through the relay; a direct file has no equivalent, because the
+      // element fetches it itself.
+      return 'This file could not be played — the format may be unsupported, or the server may not allow playback from another site.';
     default:
       return 'This source could not be played.';
   }

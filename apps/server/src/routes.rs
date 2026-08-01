@@ -15,6 +15,7 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::{HeaderName, HeaderValue, Method, header},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use serde::Deserialize;
@@ -36,6 +37,7 @@ pub fn build(state: AppState) -> Router {
         .nest("/auth", auth::routes::router())
         .nest("/rooms", rooms::routes::router())
         .nest("/me", me_router())
+        .nest("/stream", stream_router())
         .route("/videos/search", get(search_videos))
         .route("/videos/resolve", get(resolve_video))
         .route("/config", get(client_config));
@@ -216,7 +218,7 @@ pub fn security_headers(state: &AppState) -> Vec<(HeaderName, HeaderValue)> {
                media-src 'self' blob: https:; \
                script-src 'self' https://www.youtube.com https://s.ytimg.com https://player.twitch.tv; \
                style-src 'self' 'unsafe-inline'; \
-               connect-src 'self' ws: wss:; \
+               connect-src 'self' https: ws: wss:; \
                font-src 'self' data:; \
                object-src 'none'; \
                base-uri 'self'; \
@@ -318,6 +320,128 @@ async fn client_config(State(state): State<AppState>) -> Json<serde_json::Value>
         "maxRoomParticipants": 100,
         "reactions": crate::realtime::session::ALLOWED_REACTIONS,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Stream relay
+// ---------------------------------------------------------------------------
+
+/// Where the relay lives. Written once and shared with the rewriter, so the
+/// paths in a rewritten manifest can never drift from the routes that serve
+/// them.
+const MANIFEST_ROUTE: &str = "/api/stream/manifest";
+const SEGMENT_ROUTE: &str = "/api/stream/segment";
+
+/// Ceiling on a single relayed segment.
+///
+/// Segments are a few seconds of video — single-digit megabytes at the
+/// bitrates anyone streams over the web. The cap is what stops the relay being
+/// used to pull arbitrarily large files through the server.
+const MAX_SEGMENT_BYTES: u64 = 48 * 1024 * 1024;
+
+const RELAY_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn stream_router() -> Router<AppState> {
+    Router::new()
+        .route("/manifest", get(relay_manifest))
+        .route("/segment", get(relay_segment))
+}
+
+#[derive(Debug, Deserialize)]
+struct RelayQuery {
+    url: String,
+}
+
+/// Fetch a manifest and hand it back with every reference pointing at us.
+///
+/// Authenticated deliberately. An unauthenticated version of this endpoint is
+/// an open proxy: anyone on the internet could route traffic through the
+/// server, at the server's expense and under its IP address.
+async fn relay_manifest(
+    State(state): State<AppState>,
+    CurrentUser(claims): CurrentUser,
+    Query(query): Query<RelayQuery>,
+) -> AppResult<Response> {
+    relay_allowed(&state, &claims).await?;
+
+    let opened = crate::media::fetch::open_stream(&query.url, RELAY_TIMEOUT).await?;
+    let final_url = opened.final_url.clone();
+
+    let body = opened
+        .response
+        .text()
+        .await
+        .map_err(|_| AppError::BadRequest("That stream stopped responding.".into()))?;
+
+    let rewritten =
+        crate::media::relay::rewrite_manifest(&body, &final_url, MANIFEST_ROUTE, SEGMENT_ROUTE);
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
+            // A live manifest is rewritten every few seconds; caching one is
+            // how a player ends up stuck on a window that has already expired.
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        rewritten,
+    )
+        .into_response())
+}
+
+/// Stream a segment through, without buffering it.
+async fn relay_segment(
+    State(state): State<AppState>,
+    CurrentUser(claims): CurrentUser,
+    Query(query): Query<RelayQuery>,
+) -> AppResult<Response> {
+    relay_allowed(&state, &claims).await?;
+
+    let opened = crate::media::fetch::open_stream(&query.url, RELAY_TIMEOUT).await?;
+
+    if opened.response.content_length().is_some_and(|length| length > MAX_SEGMENT_BYTES) {
+        return Err(AppError::BadRequest("That segment is too large.".into()));
+    }
+
+    let content_type = opened
+        .content_type
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    let content_type = HeaderValue::from_str(&content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            // Media segments are immutable once published, and a live playlist
+            // stops referencing them soon enough that this is bounded.
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=30"),
+            ),
+        ],
+        axum::body::Body::from_stream(opened.response.bytes_stream()),
+    )
+        .into_response())
+}
+
+/// Meter the relay per user.
+///
+/// Far tighter than the general HTTP limit would be: one channel is a manifest
+/// refresh every few seconds plus a segment each, and anything an order of
+/// magnitude above that is not someone watching television.
+async fn relay_allowed(state: &AppState, claims: &crate::auth::tokens::AccessClaims) -> Result<(), AppError> {
+    let mut redis = state.redis.clone();
+    let decision =
+        crate::ratelimit::check_per_minute(&mut redis, "relay", &claims.sub.to_string(), 600).await;
+
+    if decision.allowed {
+        Ok(())
+    } else {
+        state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+        Err(AppError::RateLimited {
+            retry_after_ms: decision.retry_after_ms,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
