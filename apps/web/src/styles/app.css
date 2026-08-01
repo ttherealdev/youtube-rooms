@@ -157,6 +157,30 @@
   --shadow-lg: var(--shadow-lg);
   --shadow-xl: var(--shadow-xl);
   --shadow-2xl: var(--shadow-2xl);
+
+  /*
+   * The player's loading indicator: a sliver travelling across a rule at the
+   * top of the picture, the way a browser shows a page loading.
+   *
+   * It replaces a large spinning circle in the middle of the frame. A spinner
+   * sits exactly where the video is about to appear, so every buffer — however
+   * brief — reads as an interruption. This is legible when you look for it and
+   * invisible when you do not, which is the correct weight for "the picture is
+   * a moment away".
+   */
+  --animate-indeterminate: indeterminate 1.5s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%) scaleX(0.4);
+  }
+  50% {
+    transform: translateX(60%) scaleX(1);
+  }
+  100% {
+    transform: translateX(260%) scaleX(0.4);
+  }
 }
 
 @layer base {

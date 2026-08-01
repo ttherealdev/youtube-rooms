@@ -10,27 +10,6 @@ import {
 import { type EngineEvents, type PlayerEngine, usableDuration } from './engine';
 
 /**
- * YouTube's internal rendition names, in the order the API reports them.
- *
- * The API speaks in labels like `hd1080` and `large`, and nobody outside
- * YouTube knows that `large` means 480p. The menu shows the right-hand side and
- * this engine translates back, so the rest of the app never has to learn the
- * vocabulary.
- */
-const QUALITY_LABELS: Record<string, string> = {
-  highres: '4320p',
-  hd2880: '2880p',
-  hd2160: '2160p',
-  hd1440: '1440p',
-  hd1080: '1080p',
-  hd720: '720p',
-  large: '480p',
-  medium: '360p',
-  small: '240p',
-  tiny: '144p',
-};
-
-/**
  * How long to wait before concluding the browser refused an audible start.
  *
  * Autoplay policy rejects playback no gesture asked for, and the IFrame API
@@ -38,10 +17,6 @@ const QUALITY_LABELS: Record<string, string> = {
  * callback. Asking again shortly afterwards is the only way to notice.
  */
 const AUTOPLAY_GRACE_MS = 1200;
-
-/** How often to look for renditions, and for how long, once playback starts. */
-const QUALITY_POLL_MS = 1000;
-const QUALITY_POLL_LIMIT = 15;
 
 /**
  * The YouTube adapter.
@@ -69,11 +44,6 @@ export class YouTubeEngine implements PlayerEngine {
    * position that meant nothing. Live streams must report *no* duration.
    */
   #live = false;
-
-  /** Human label to YouTube's name, for translating a menu choice back. */
-  #levels = new Map<string, string>();
-  #qualities: string[] = [];
-  #pinned: string | null = null;
 
   #timers = new Set<ReturnType<typeof setTimeout>>();
   /** Set once the engine has muted itself to get past autoplay policy. */
@@ -159,9 +129,6 @@ export class YouTubeEngine implements PlayerEngine {
             this.#live = target.getVideoData?.()?.isLive ?? this.#live;
             if (this.#live && !wasLive) this.#events.onLive?.();
             this.#reportDuration(target);
-            // Renditions do not exist until the player has chosen a stream, so
-            // this is the first moment there is a menu to build.
-            this.#pollQualities();
           }
           if (data === PlayerState.Paused) this.#events.onIntentPause?.();
         },
@@ -192,30 +159,6 @@ export class YouTubeEngine implements PlayerEngine {
       if (!this.#destroyed) run();
     }, ms);
     this.#timers.add(id);
-  }
-
-  /**
-   * Look for renditions until they appear.
-   *
-   * `getAvailableQualityLevels()` answers with an empty array until the player
-   * has actually selected a stream, and there is no event for the moment it
-   * fills in — so the menu that was wired to `onQualitiesChange` never had
-   * anything to show, and the room hid it as "this source offers no choice".
-   */
-  #pollQualities(attempt = 0): void {
-    if (this.#destroyed || attempt >= QUALITY_POLL_LIMIT) return;
-
-    const levels = this.#player?.getAvailableQualityLevels?.() ?? [];
-    const named = levels.filter((level) => level in QUALITY_LABELS);
-
-    if (named.length > 0) {
-      this.#levels = new Map(named.map((level) => [QUALITY_LABELS[level] as string, level]));
-      this.#qualities = named.map((level) => QUALITY_LABELS[level] as string);
-      this.#events.onQualitiesChange?.();
-      return;
-    }
-
-    this.#after(QUALITY_POLL_MS, () => this.#pollQualities(attempt + 1));
   }
 
   #applyPending(): void {
@@ -301,40 +244,23 @@ export class YouTubeEngine implements PlayerEngine {
     return this.#live;
   }
 
-  qualities(): string[] {
-    return this.#qualities;
-  }
-
   /**
-   * The *pinned* rendition, not the one the player happens to be showing.
+   * Deliberately empty, so the room hides the quality menu for YouTube.
    *
-   * Null means the room has left YouTube to choose. Reporting the level it
-   * chose would tick a row in the menu that nobody selected, and make "Auto"
-   * look like it was never applied.
+   * YouTube removed programmatic rendition control from the IFrame API.
+   * `setPlaybackQuality` became advisory and then a no-op, and
+   * `setPlaybackQualityRange` — the undocumented replacement everyone moved to
+   * — went the same way. Selecting 144p in a menu built on either of them
+   * changes precisely nothing, which is worse than having no menu: the control
+   * looks broken rather than absent, and people keep pressing it.
+   *
+   * What *does* decide YouTube's rendition is the size of the player, the
+   * viewer's connection, and their own account preference. Sizing the iframe to
+   * its container — see `#create` — is the whole of the control we have, and it
+   * is why the picture is no longer stuck at 360p.
    */
-  quality(): string | null {
-    return this.#pinned;
-  }
-
-  setQuality(quality: string | null): void {
-    const player = this.#player;
-    if (!player) return;
-
-    if (quality === null) {
-      this.#pinned = null;
-      player.setPlaybackQualityRange?.('tiny', 'highres');
-      player.setPlaybackQuality?.('default');
-      return;
-    }
-
-    const level = this.#levels.get(quality);
-    if (!level) return;
-    this.#pinned = quality;
-    // The range is what the modern player actually honours; the older setter is
-    // called too because which one works has changed before and the losing call
-    // costs nothing.
-    player.setPlaybackQualityRange?.(level, level);
-    player.setPlaybackQuality?.(level);
+  qualities(): string[] {
+    return [];
   }
 
   buffering(): boolean {

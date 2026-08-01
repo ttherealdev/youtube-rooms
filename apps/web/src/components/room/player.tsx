@@ -2,7 +2,6 @@ import { Slider as SliderPrimitive } from '@base-ui/react/slider';
 import { type MediaSource, mayBeLive, positionAt } from '@playercn/protocol';
 import {
   Frame,
-  Loader2,
   Maximize,
   Minimize,
   MoreVertical,
@@ -313,10 +312,17 @@ export function Player({
       className={cn(
         'group/player relative isolate aspect-video overflow-hidden bg-black select-none',
         // Normally the player is a card in a scrolling column. In theatre it is
-        // the column: it takes the full height and derives its width from the
-        // ratio, so the picture is as large as the space allows without ever
-        // being cropped or letterboxed twice.
-        theatre ? 'h-full max-h-full w-auto max-w-full' : 'w-full rounded-xl',
+        // the column, and the picture is as large as the space allows.
+        //
+        // Sized by *width only*, with the aspect ratio deriving the height.
+        // Constraining both — `h-full` for the height and `max-w-full` for the
+        // width — is what broke the layout: the ratio and the width cap cannot
+        // both be honoured, so the box quietly overshot its column and pushed
+        // scrollbars onto the page. Capping the width at the widest 16:9 box
+        // that still fits the viewport height says the same thing in one
+        // constraint the browser can always satisfy. Theatre hides the header,
+        // so the picture column really is the full `100dvh`.
+        theatre ? 'w-full lg:w-[min(100%,calc(100dvh*16/9))]' : 'w-full rounded-xl',
         !visible && 'cursor-none',
       )}
     >
@@ -357,7 +363,7 @@ export function Player({
         error={error}
         paused={paused}
         canControl={canControl}
-        source={source}
+        poster={posterFor(source, nowPlaying?.thumbnailUrl)}
         onSkip={() => send({ kind: 'next' })}
       />
 
@@ -830,7 +836,7 @@ function StatusOverlay({
   error,
   paused,
   canControl,
-  source,
+  poster,
   onSkip,
 }: {
   awaiting: boolean;
@@ -838,7 +844,7 @@ function StatusOverlay({
   error: string | null;
   paused: boolean;
   canControl: boolean;
-  source: MediaSource;
+  poster: string | null;
   onSkip: () => void;
 }) {
   if (error) {
@@ -857,35 +863,31 @@ function StatusOverlay({
     );
   }
 
+  // Loading now shows the artwork of the thing being loaded, with a thread of
+  // motion along the top edge. The old treatment put the busiest element on
+  // screen — a large spinning circle — exactly where the picture was about to
+  // appear, so every half-second rebuffer read as a fault.
   if (awaiting || buffering) {
     return (
-      <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center bg-black/25">
-        <div className="flex flex-col items-center gap-2">
-          <Loader2 className="size-8 animate-spin text-white/90" />
-          {awaiting ? <p className="text-xs text-white/80">Waiting for everyone to load…</p> : null}
+      <div className="pointer-events-none absolute inset-0 z-20">
+        <Artwork poster={poster} dim="bg-black/40" />
+        <div className="absolute inset-x-0 top-0 h-[3px] overflow-hidden">
+          <div className="h-full w-1/3 animate-indeterminate rounded-full bg-white/90" />
         </div>
+        {awaiting ? (
+          <p className="absolute inset-x-0 bottom-20 text-center text-xs text-white/80">
+            Waiting for everyone to load…
+          </p>
+        ) : null}
       </div>
     );
   }
 
   if (!paused) return null;
 
-  // A paused YouTube embed draws a grid of related videos over the picture, and
-  // no player parameter turns it off — `rel=0` only narrows it to the same
-  // channel. The only thing that works is covering the iframe, so a paused
-  // YouTube video gets its own poster frame instead of YouTube's shop window.
-  const poster = source.kind === 'youtube' && source.videoId ? posterFor(source.videoId) : null;
-
   return (
-    <div
-      className={cn(
-        'pointer-events-none absolute inset-0 z-20 grid place-items-center',
-        poster ? 'bg-black bg-cover bg-center' : 'bg-black/30',
-      )}
-      style={poster ? { backgroundImage: `url(${poster})` } : undefined}
-    >
-      {/* Dimmed so the play button reads against a bright thumbnail. */}
-      {poster ? <span className="absolute inset-0 bg-black/45" /> : null}
+    <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center">
+      <Artwork poster={poster} dim="bg-black/45" />
       <span className="relative grid size-16 place-items-center rounded-full bg-black/55 backdrop-blur-sm">
         <Play className="size-7 fill-white text-white" />
       </span>
@@ -919,14 +921,52 @@ function UnmuteOverlay({ onUnmute }: { onUnmute: () => void }) {
 }
 
 /**
- * A still for a paused YouTube video.
+ * The backdrop behind every non-playing state.
+ *
+ * It earns its place twice over. It gives buffering and paused something to
+ * look at other than a black rectangle — and for YouTube it is also a cover: a
+ * paused embed draws a grid of related videos over the picture, and no player
+ * parameter turns it off, `rel=0` having meant "from this channel" rather than
+ * "none" since 2018.
+ */
+function Artwork({ poster, dim }: { poster: string | null; dim: string }) {
+  if (!poster) return <span className={cn('absolute inset-0', dim)} />;
+
+  return (
+    <>
+      {/* Blurred and pushed past the edges underneath, so artwork that is not
+          exactly 16:9 fills the frame instead of showing pillarboxes. */}
+      <span
+        className="absolute inset-0 scale-110 bg-cover bg-center blur-xl"
+        style={{ backgroundImage: `url(${poster})` }}
+      />
+      <span
+        className="absolute inset-0 bg-contain bg-center bg-no-repeat"
+        style={{ backgroundImage: `url(${poster})` }}
+      />
+      <span className={cn('absolute inset-0', dim)} />
+    </>
+  );
+}
+
+/**
+ * The best still available for a source.
+ *
+ * The queue row is preferred, because it carries whatever artwork the source's
+ * own metadata offered. YouTube can always synthesise one from the video id,
+ * which matters because it is the source whose paused state most needs
+ * covering.
  *
  * `hqdefault` rather than `maxresdefault`: the latter is missing for a lot of
  * older and lower-resolution uploads, and a 404 here would show a broken
  * backdrop instead of covering the thing it exists to cover.
  */
-function posterFor(videoId: string): string {
-  return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+function posterFor(source: MediaSource, queueThumbnail: string | undefined): string | null {
+  if (queueThumbnail) return queueThumbnail;
+  if (source.kind === 'youtube' && source.videoId) {
+    return `https://i.ytimg.com/vi/${source.videoId}/hqdefault.jpg`;
+  }
+  return null;
 }
 
 function ControlButton({

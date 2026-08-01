@@ -39,8 +39,18 @@ export class KickEngine implements PlayerEngine {
   #announced = false;
 
   #playing = false;
-  /** Starts true: see the note on the class. */
-  #muted = true;
+  /**
+   * Whether to load silently, decided once from the page's activation state.
+   *
+   * Muting guarantees the embed can start, but it costs a reload to undo — and
+   * a reload is the one thing this engine cannot make cheap. So it is only paid
+   * when it is actually needed: a page the viewer has already interacted with
+   * has user activation, and `allow="autoplay"` passes that down to the iframe,
+   * so the embed may start with sound and no reload is ever required. Someone
+   * who landed on a room link and touched nothing still starts muted, because
+   * for them an audible start would be refused outright.
+   */
+  #muted = !hasUserActivation();
 
   constructor(container: HTMLElement, source: MediaSource, events: EngineEvents = {}) {
     this.#container = container;
@@ -195,6 +205,20 @@ export class KickEngine implements PlayerEngine {
     this.#destroyed = true;
     this.#teardown();
   }
+}
+
+/**
+ * Has this page been interacted with?
+ *
+ * `navigator.userActivation.hasBeenActive` is the browser's own answer to the
+ * question autoplay policy turns on, and it is sticky for the lifetime of the
+ * document — so a viewer who clicked anything to get into the room counts.
+ * Treated as "no" where the API is missing, which errs towards a silent start
+ * rather than a refused one.
+ */
+function hasUserActivation(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return navigator.userActivation?.hasBeenActive ?? false;
 }
 
 /** `kick.com/<channel>`, already canonicalised by the server. */

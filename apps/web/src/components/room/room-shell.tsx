@@ -157,7 +157,12 @@ export function RoomShell({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="flex h-dvh flex-col">
+    // `overflow-hidden` is load-bearing: the room owns exactly one viewport and
+    // scrolls only inside its panels. Without it any child that overshoots by a
+    // pixel — a 16:9 box rounded up, a border on a full-height column — puts a
+    // scrollbar on the *page*, which is what made theatre mode grow a bar down
+    // the right and along the bottom.
+    <div className="flex h-dvh flex-col overflow-hidden">
       {/* Theatre mode reclaims the header's height for the picture. The room
           name is still reachable — it is in the player's own title line — so
           nothing is lost but chrome. */}
@@ -190,18 +195,26 @@ export function RoomShell({ slug }: { slug: string }) {
 
       {/* Theatre keeps the two columns — the whole point is watching *with*
           people — but gives the player every pixel the chat does not need, and
-          lets it fill the height instead of sitting in a padded card. */}
+          lets it fill the height instead of sitting in a padded card.
+
+          Both layouts are single-column below `lg`. Theatre used to pin a
+          320px sidebar at every width, so on a narrow screen the two columns
+          could not both fit and the row overflowed sideways. `minmax(0,…)` on
+          the picture column is the other half of that: a bare `1fr` refuses to
+          shrink below its contents, and a 16:9 box is very wide content. */}
       <div
         className={cn(
           'grid min-h-0 flex-1',
-          theatre ? 'grid-cols-[minmax(0,1fr)_320px]' : 'lg:grid-cols-[1fr_380px]',
+          theatre ? 'lg:grid-cols-[minmax(0,1fr)_320px]' : 'lg:grid-cols-[minmax(0,1fr)_380px]',
         )}
       >
         <main
           ref={playerRef}
           className={cn(
-            'min-h-0',
-            theatre ? 'grid place-items-center overflow-hidden bg-black' : 'overflow-y-auto p-4',
+            'min-h-0 min-w-0',
+            theatre
+              ? 'overflow-hidden bg-black lg:grid lg:place-items-center'
+              : 'overflow-y-auto p-4',
           )}
         >
           <Player
@@ -212,9 +225,7 @@ export function RoomShell({ slug }: { slug: string }) {
           />
         </main>
 
-        <aside
-          className={cn('flex min-h-0 flex-col border-t', !theatre && 'lg:border-t-0 lg:border-l')}
-        >
+        <aside className="flex min-h-0 min-w-0 flex-col border-t lg:border-t-0 lg:border-l">
           <Tabs
             value={panel}
             onValueChange={(next) => setPanel((next as typeof panel) ?? 'chat')}
