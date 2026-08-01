@@ -109,6 +109,7 @@ export class YouTubeEngine implements PlayerEngine {
           }
           this.#player = target;
           this.#fillContainer(target);
+          this.#silenceCaptions(target);
           this.#live = target.getVideoData?.()?.isLive ?? false;
           this.#applyPending();
           this.#events.onReady?.();
@@ -129,6 +130,9 @@ export class YouTubeEngine implements PlayerEngine {
             this.#live = target.getVideoData?.()?.isLive ?? this.#live;
             if (this.#live && !wasLive) this.#events.onLive?.();
             this.#reportDuration(target);
+            // Again on playback start: the player loads its caption track with
+            // the stream, so a module unloaded at `onReady` can come back.
+            this.#silenceCaptions(target);
           }
           if (data === PlayerState.Paused) this.#events.onIntentPause?.();
         },
@@ -140,6 +144,30 @@ export class YouTubeEngine implements PlayerEngine {
     // Held only so an immediate destroy() can tear it down even if `onReady`
     // has not fired yet.
     if (this.#destroyed) player.destroy();
+  }
+
+  /**
+   * Keep captions off, for good.
+   *
+   * `cc_load_policy=0` only asks the player not to *start* with them. A channel
+   * that force-enables captions, or a viewer whose own YouTube account defaults
+   * them on, still gets them — the parameter is a preference, not a switch.
+   * Unloading the module removes the thing that renders them at all.
+   *
+   * Called again whenever playback starts, because the player loads its caption
+   * track alongside the stream and can bring the module back with it. Both
+   * module names are tried: `cc` on the HTML5 player, `captions` on the old
+   * one. Neither call is documented and both throw when the module is not
+   * loaded, which is the ordinary case and not worth hearing about.
+   */
+  #silenceCaptions(player: YouTubePlayer): void {
+    for (const module of ['cc', 'captions']) {
+      try {
+        player.unloadModule?.(module);
+      } catch {
+        /* Not loaded, which is the outcome being asked for anyway. */
+      }
+    }
   }
 
   /** Make the created iframe fill its container rather than sit at 640×390. */

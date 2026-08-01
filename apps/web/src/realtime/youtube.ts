@@ -41,6 +41,14 @@ export interface YouTubePlayer {
   setPlaybackQualityRange?(min: string, max?: string): void;
   /** The iframe the API created, so it can be sized to its container. */
   getIframe?(): HTMLIFrameElement;
+  /**
+   * Tear a player module out. The only reliable way to keep captions off.
+   *
+   * Undocumented but long-standing, and the module has had two names across
+   * the player's lifetime — `cc` on the HTML5 player, `captions` on the Flash
+   * one — so both are worth asking for.
+   */
+  unloadModule?(module: string): void;
   playVideo(): void;
   pauseVideo(): void;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
@@ -160,6 +168,11 @@ export const PLAYER_VARS = {
   playsinline: 1,
   iv_load_policy: 3,
   fs: 0,
+  // Captions off. This alone is not enough — it asks the player not to *start*
+  // with them, and a video whose channel force-enables them, or a viewer whose
+  // YouTube account defaults them on, gets them anyway. The engine unloads the
+  // captions module as well; see `#silenceCaptions`.
+  cc_load_policy: 0,
   // Required by the API when the page is not served from the embedding origin.
   origin: typeof window !== 'undefined' ? window.location.origin : '',
 } as const;
