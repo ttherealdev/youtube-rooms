@@ -64,6 +64,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub google: Option<GoogleConfig>,
     pub youtube: YouTubeConfig,
+    pub kick: KickConfig,
     pub realtime: RealtimeConfig,
     pub voice: VoiceConfig,
     pub limits: LimitsConfig,
@@ -109,6 +110,17 @@ pub struct YouTubeConfig {
     /// direct-URL paste only — the room still works.
     pub api_key: Option<String>,
     pub metadata_cache_ttl: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct KickConfig {
+    /// Client credentials for Kick's public API. Absent means a queued Kick
+    /// channel shows its slug and no artwork — it still plays.
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// Short by default: the record carries live state, which goes stale fast.
+    pub metadata_cache_ttl: Duration,
+    pub request_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +235,13 @@ impl Config {
                 metadata_cache_ttl: secs(
                     parse_opt("YOUTUBE_CACHE_TTL_SECS")?.unwrap_or(60 * 60 * 12),
                 ),
+            },
+
+            kick: KickConfig {
+                client_id: optional("KICK_CLIENT_ID"),
+                client_secret: optional("KICK_CLIENT_SECRET"),
+                metadata_cache_ttl: secs(parse_opt("KICK_CACHE_TTL_SECS")?.unwrap_or(300)),
+                request_timeout: secs(parse_opt("KICK_TIMEOUT_SECS")?.unwrap_or(8)),
             },
 
             realtime: RealtimeConfig {
@@ -495,6 +514,12 @@ mod tests {
             },
             google: None,
             youtube: YouTubeConfig { api_key: None, metadata_cache_ttl: secs(60) },
+            kick: KickConfig {
+                client_id: None,
+                client_secret: None,
+                metadata_cache_ttl: secs(300),
+                request_timeout: secs(8),
+            },
             realtime: RealtimeConfig {
                 heartbeat_interval: secs(15),
                 client_timeout: secs(30),

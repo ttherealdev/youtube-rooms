@@ -8,6 +8,7 @@
 use crate::{
     cache, db,
     error::AppError,
+    kick::Kick,
     ratelimit,
     realtime::{
         protocol::{
@@ -681,6 +682,26 @@ impl Session {
                 channel_title: metadata.channel_title.clone(),
                 duration_seconds: metadata.duration_seconds,
                 thumbnail_url: metadata.thumbnail_url.clone(),
+                added_by: self.user.id,
+            });
+        }
+
+        // Kick cannot be described from its URL — the slug is all it carries —
+        // and the artwork matters more here than anywhere else: Kick is blocked
+        // in a number of countries, so for some viewers the poster the *server*
+        // fetched is the only thing they will ever see of the stream.
+        if source.kind == crate::media::SourceKind::Kick {
+            let slug = source.url.rsplit('/').find(|part| !part.is_empty()).unwrap_or_default();
+            let kick = Kick::new(self.state.config.kick.clone(), self.state.http.clone());
+            let mut redis = self.state.redis.clone();
+            let metadata = kick.channel(&mut redis, slug).await;
+
+            return Ok(db::queue::NewQueueItem {
+                title: metadata.title,
+                channel_title: metadata.channel_title,
+                duration_seconds: 0,
+                thumbnail_url: metadata.thumbnail_url,
+                source,
                 added_by: self.user.id,
             });
         }

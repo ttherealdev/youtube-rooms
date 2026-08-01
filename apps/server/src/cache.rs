@@ -64,6 +64,20 @@ pub mod keys {
         format!("ytr:video:{video_id}")
     }
 
+    /// Kick's app access token, shared by every node.
+    ///
+    /// Cached rather than re-minted per lookup: the token is valid for an hour
+    /// and the credentials that mint it are rate limited, so a room full of
+    /// people pasting channel links must not each cost a round trip to Kick's
+    /// identity service.
+    pub fn kick_token() -> String {
+        "ytr:kick:token".to_owned()
+    }
+
+    pub fn kick_channel(slug: &str) -> String {
+        format!("ytr:kick:channel:{slug}")
+    }
+
     pub fn rate_limit(scope: &str, subject: &str) -> String {
         format!("ytr:rl:{scope}:{subject}")
     }

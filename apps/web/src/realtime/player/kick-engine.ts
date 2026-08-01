@@ -2,6 +2,18 @@ import type { MediaSource } from '@playercn/protocol';
 import type { EngineEvents, PlayerEngine } from './engine';
 
 /**
+ * How long to wait for the embed before calling it unreachable.
+ *
+ * Kick is blocked outright in several countries, and a blocked iframe is
+ * *silent*: cross-origin rules mean no `load`, no `error`, no way to inspect
+ * it — the element simply never resolves. Without a deadline those viewers sat
+ * behind "Waiting for everyone to load…" indefinitely, holding up a room whose
+ * other members were watching fine. Generous, because this also has to cover a
+ * genuinely slow connection.
+ */
+const REACHABLE_MS = 12_000;
+
+/**
  * The Kick adapter.
  *
  * Kick publishes an embeddable player and no JavaScript API for it whatsoever —
@@ -37,6 +49,7 @@ export class KickEngine implements PlayerEngine {
   #destroyed = false;
   #ready = false;
   #announced = false;
+  #unreachable: ReturnType<typeof setTimeout> | null = null;
 
   #playing = false;
   /**
@@ -97,8 +110,24 @@ export class KickEngine implements PlayerEngine {
     frame.style.display = 'block';
     frame.title = `Kick channel ${this.#channel}`;
 
+    // Cleared by `load`. If it ever fires, the embed never arrived.
+    this.#unreachable = setTimeout(() => {
+      if (this.#destroyed || this.#ready) return;
+      // Readiness is released alongside the error so the room stops waiting on
+      // this viewer — the rest of the room should not be held up by one
+      // person's network refusing to reach Kick.
+      if (!this.#announced) {
+        this.#announced = true;
+        this.#events.onReady?.();
+      }
+      this.#events.onError?.(
+        'Kick did not load. It may be blocked on your network — the rest of the room can carry on without you.',
+      );
+    }, REACHABLE_MS);
+
     frame.addEventListener('load', () => {
       if (this.#destroyed) return;
+      this.#clearUnreachable();
       this.#ready = true;
       this.#events.onBufferingChange?.(false);
 
@@ -126,8 +155,15 @@ export class KickEngine implements PlayerEngine {
   }
 
   #teardown(): void {
+    this.#clearUnreachable();
     this.#frame?.remove();
     this.#frame = null;
+  }
+
+  #clearUnreachable(): void {
+    if (this.#unreachable === null) return;
+    clearTimeout(this.#unreachable);
+    this.#unreachable = null;
   }
 
   currentTime(): number {

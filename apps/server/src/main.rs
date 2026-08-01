@@ -11,6 +11,7 @@ mod error;
 mod health;
 mod media;
 mod metrics;
+mod kick;
 mod ratelimit;
 mod realtime;
 mod rooms;
@@ -77,6 +78,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if config.youtube.api_key.is_none() {
         tracing::warn!("YOUTUBE_API_KEY unset — search is disabled; links still work");
+    }
+    if config.kick.client_id.is_none() || config.kick.client_secret.is_none() {
+        tracing::warn!("KICK_CLIENT_ID/SECRET unset — Kick channels queue without a title or artwork");
     }
 
     let hub = Arc::new(Hub::new(Arc::clone(&config), db.clone(), redis.clone()));

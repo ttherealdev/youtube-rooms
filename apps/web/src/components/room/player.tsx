@@ -849,8 +849,13 @@ function StatusOverlay({
 }) {
   if (error) {
     return (
-      <div className="absolute inset-0 z-30 grid place-items-center bg-black/85 p-6 text-center">
-        <div className="max-w-sm space-y-2">
+      <div className="absolute inset-0 z-30 grid place-items-center p-6 text-center">
+        {/* The artwork earns its keep hardest here. A viewer whose network
+            blocks the source — Kick is unreachable from several countries —
+            gets the still the *server* fetched, which is the only part of the
+            stream that will ever reach them. */}
+        <Artwork poster={poster} dim="bg-black/85" />
+        <div className="relative max-w-sm space-y-2">
           <p className="text-sm font-medium text-white">Can’t play this source</p>
           <p className="text-xs text-white/70">{error}</p>
           {canControl ? (
