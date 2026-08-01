@@ -110,7 +110,7 @@ export type Participant = z.infer<typeof participant>;
  * IFrame API; `file` is a bare media element; `hls` and `dash` need Media
  * Source Extensions.
  */
-export const sourceKind = z.enum(['youtube', 'file', 'hls', 'dash']);
+export const sourceKind = z.enum(['youtube', 'file', 'hls', 'dash', 'twitch', 'kick']);
 export type SourceKind = z.infer<typeof sourceKind>;
 
 export const mediaSource = z.object({
@@ -121,9 +121,20 @@ export const mediaSource = z.object({
 });
 export type MediaSource = z.infer<typeof mediaSource>;
 
-/** Live sources have no end to seek to, so the UI hides the scrubber. */
+/**
+ * Live sources have no end to seek to, so the UI hides the scrubber.
+ *
+ * Twitch is included even though it also serves VODs: a channel URL and a VOD
+ * URL have the same effect on the room, and offering a seek bar for a live
+ * channel is a worse failure than withholding one from a VOD.
+ */
 export function mayBeLive(source: MediaSource): boolean {
-  return source.kind === 'hls' || source.kind === 'dash';
+  return (
+    source.kind === 'hls' ||
+    source.kind === 'dash' ||
+    source.kind === 'twitch' ||
+    source.kind === 'kick'
+  );
 }
 
 export const queueItem = z.object({

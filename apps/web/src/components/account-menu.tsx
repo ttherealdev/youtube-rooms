@@ -14,6 +14,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -78,12 +79,17 @@ export function AccountMenu() {
           }
         />
         <DropdownMenuContent align="end" className="w-56">
-          <DropdownMenuLabel className="flex flex-col gap-0.5">
-            <span className="truncate text-sm font-medium">{user.displayName}</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              {user.kind === 'guest' ? 'Guest — this device only' : 'Google account'}
-            </span>
-          </DropdownMenuLabel>
+          {/* The label is a `GroupLabel`, which throws outside a `Group` — it
+              is labelling something, and the primitive insists on being told
+              what. */}
+          <DropdownMenuGroup>
+            <DropdownMenuLabel className="flex flex-col gap-0.5">
+              <span className="truncate text-sm font-medium">{user.displayName}</span>
+              <span className="text-xs font-normal text-muted-foreground">
+                {user.kind === 'guest' ? 'Guest — this device only' : 'Google account'}
+              </span>
+            </DropdownMenuLabel>
+          </DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => setRenaming(true)}>
             <Pencil className="size-4" />

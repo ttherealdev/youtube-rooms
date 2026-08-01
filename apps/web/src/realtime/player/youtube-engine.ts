@@ -2,6 +2,7 @@ import type { MediaSource } from '@playercn/protocol';
 import {
   describePlayerError,
   loadYouTubeApi,
+  PLAYER_HOST,
   PLAYER_VARS,
   PlayerState,
   type YouTubePlayer,
@@ -56,6 +57,7 @@ export class YouTubeEngine implements PlayerEngine {
 
     const player = new api.Player(container, {
       videoId: source.videoId,
+      host: PLAYER_HOST,
       playerVars: { ...PLAYER_VARS },
       events: {
         onReady: ({ target }) => {

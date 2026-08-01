@@ -203,14 +203,18 @@ async fn throttle_by_ip(
 
 /// Security headers applied to every response.
 ///
-/// The CSP is deliberately strict but must permit the YouTube IFrame player and
-/// its image CDN — that is the one third-party surface this app embeds.
+/// The CSP stays strict where strictness costs nothing, and is explicit about
+/// the two places it cannot be: a room plays arbitrary URLs, so `media-src` and
+/// `img-src` have to admit any https origin. Pinning those to an allowlist
+/// would mean the product only works for hosts we happened to think of, which
+/// is the opposite of what a room is for. Everything that executes code —
+/// `script-src`, `frame-src`, `object-src` — stays on a named list.
 pub fn security_headers(state: &AppState) -> Vec<(HeaderName, HeaderValue)> {
     let csp = "default-src 'self'; \
-               frame-src https://www.youtube.com https://www.youtube-nocookie.com; \
-               img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://lh3.googleusercontent.com; \
-               media-src 'self' blob:; \
-               script-src 'self' https://www.youtube.com https://s.ytimg.com; \
+               frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.twitch.tv https://player.kick.com; \
+               img-src 'self' data: https:; \
+               media-src 'self' blob: https:; \
+               script-src 'self' https://www.youtube.com https://s.ytimg.com https://player.twitch.tv; \
                style-src 'self' 'unsafe-inline'; \
                connect-src 'self' ws: wss:; \
                font-src 'self' data:; \

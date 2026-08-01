@@ -1,12 +1,14 @@
 import { Slider as SliderPrimitive } from '@base-ui/react/slider';
 import { type MediaSource, mayBeLive, positionAt } from '@playercn/protocol';
 import {
+  Frame,
   Loader2,
   Maximize,
   Minimize,
   MoreVertical,
   Pause,
   Play,
+  RectangleHorizontal,
   Repeat,
   Repeat1,
   RotateCcw,
@@ -23,6 +25,7 @@ import { Button } from '~/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -31,7 +34,9 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip';
 import { cn, formatDuration } from '~/lib/utils';
 import type { PlayerEngine } from '~/realtime/player/engine';
+import { KickEngine } from '~/realtime/player/kick-engine';
 import { MediaEngine } from '~/realtime/player/media-engine';
+import { TwitchEngine } from '~/realtime/player/twitch-engine';
 import { YouTubeEngine } from '~/realtime/player/youtube-engine';
 import type { RoomSocket } from '~/realtime/socket';
 import { usePlayerSync } from '~/realtime/use-player-sync';
@@ -41,6 +46,9 @@ const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 
 /** Skip step for the jump-back / jump-forward controls, in seconds. */
 const SKIP = 10;
+
+/** Source kinds that draw into a third-party iframe rather than a `<video>`. */
+const EMBEDDED_KINDS = new Set<MediaSource['kind']>(['youtube', 'twitch', 'kick']);
 
 /** How long the chrome stays up after the pointer stops moving. */
 const IDLE_MS = 2600;
@@ -61,10 +69,15 @@ const IDLE_MS = 2600;
 export function Player({
   socket,
   onEngine,
+  theatre = false,
+  onTheatre,
 }: {
   socket: RoomSocket | null;
   /** Lifted so the room can bind keyboard shortcuts to the live engine. */
   onEngine?: (engine: PlayerEngine | null) => void;
+  /** Owned by the room, because it is the room's layout that changes. */
+  theatre?: boolean;
+  onTheatre?: () => void;
 }) {
   const timeline = useTimeline();
   const permissions = usePermissions();
@@ -90,6 +103,13 @@ export function Player({
   const sourceKey = source ? `${source.kind}:${source.url}` : null;
   const canControl = permissions?.canControlPlayback ?? false;
   const live = source ? mayBeLive(source) : false;
+  // Which of the two mounts this source draws into: a third-party iframe, or
+  // the plain media element.
+  const embedded = source ? EMBEDDED_KINDS.has(source.kind) : false;
+  // Kick publishes an embed but no API for it, so the room genuinely cannot
+  // drive playback. The controls say so rather than pretending: a play button
+  // that does nothing is worse than one that is visibly unavailable.
+  const drivable = source?.kind !== 'kick';
   const awaiting = timeline?.awaitingStart ?? false;
   const paused = timeline?.paused ?? true;
   const duration = timeline?.duration ?? null;
@@ -145,10 +165,18 @@ export function Player({
       },
     };
 
+    // Three of these draw into the shared embed mount and one into the shared
+    // `<video>`; both nodes always exist, so nothing depends on a ref that has
+    // not been attached yet on the render that builds the engine.
+    const mount = mountRef.current as HTMLElement;
     const next: PlayerEngine =
       source.kind === 'youtube'
-        ? new YouTubeEngine(mountRef.current as HTMLElement, source, events)
-        : new MediaEngine(videoRef.current as HTMLVideoElement, source, events);
+        ? new YouTubeEngine(mount, source, events)
+        : source.kind === 'twitch'
+          ? new TwitchEngine(mount, source, events)
+          : source.kind === 'kick'
+            ? new KickEngine(mount, source, events)
+            : new MediaEngine(videoRef.current as HTMLVideoElement, source, events);
 
     engineRef.current = next;
     setEngine(next);
@@ -156,6 +184,10 @@ export function Player({
     return () => {
       next.destroy();
       engineRef.current = null;
+      // Each embed tears down its own iframe, but they do not all agree on
+      // whether the wrapper goes with it. Clearing the shared mount guarantees
+      // a dead player is never left stacked behind the next one.
+      mount.replaceChildren();
     };
   }, [sourceKey, socket]);
 
@@ -234,8 +266,8 @@ export function Player({
           a ref that has not been attached yet on the render the engine builds. */}
       <div
         ref={mountRef}
-        className={cn('size-full', source.kind !== 'youtube' && 'hidden')}
-        aria-hidden={source.kind !== 'youtube'}
+        className={cn('size-full', !embedded && 'hidden')}
+        aria-hidden={!embedded}
       />
       {/* Captions travel inside the media — an HLS manifest carries its own
           subtitle renditions, and an MP4 its own tracks — so there is no
@@ -243,22 +275,24 @@ export function Player({
       {/* biome-ignore lint/a11y/useMediaCaption: captions ship inside the source */}
       <video
         ref={videoRef}
-        className={cn('size-full bg-black', source.kind === 'youtube' && 'hidden')}
+        className={cn('size-full bg-black', embedded && 'hidden')}
         playsInline
-        aria-hidden={source.kind === 'youtube'}
+        aria-hidden={embedded}
       />
 
       {/* Click target over the picture. It sits *under* the control bar, and
           for YouTube it doubles as the lid that stops the iframe eating clicks
           and letting one person drive their own player out of sync. */}
-      <button
-        type="button"
-        onClick={toggle}
-        onDoubleClick={() => toggleFullscreen(containerRef.current)}
-        disabled={!canControl}
-        aria-label={paused ? 'Play' : 'Pause'}
-        className="absolute inset-0 z-10 cursor-default disabled:cursor-default"
-      />
+      {drivable ? (
+        <button
+          type="button"
+          onClick={toggle}
+          onDoubleClick={() => toggleFullscreen(containerRef.current)}
+          disabled={!canControl}
+          aria-label={paused ? 'Play' : 'Pause'}
+          className="absolute inset-0 z-10 cursor-default disabled:cursor-default"
+        />
+      ) : null}
 
       <StatusOverlay
         awaiting={awaiting}
@@ -266,6 +300,8 @@ export function Player({
         error={error}
         paused={paused}
         canControl={canControl}
+        source={source}
+        drivable={drivable}
         onSkip={() => send({ kind: 'next' })}
       />
 
@@ -319,7 +355,7 @@ export function Player({
           <div className="flex items-center gap-0.5 sm:gap-1">
             <ControlButton
               label={paused ? 'Play' : 'Pause'}
-              disabled={!canControl}
+              disabled={!canControl || !drivable}
               onClick={toggle}
             >
               {paused ? (
@@ -347,7 +383,7 @@ export function Player({
 
             <ControlButton
               label="Previous"
-              disabled={!canControl}
+              disabled={!canControl || !drivable}
               onClick={() => send({ kind: 'previous' })}
             >
               <SkipBack className="size-5" />
@@ -355,7 +391,7 @@ export function Player({
 
             <ControlButton
               label="Next"
-              disabled={!canControl}
+              disabled={!canControl || !drivable}
               onClick={() => send({ kind: 'next' })}
             >
               <SkipForward className="size-5" />
@@ -403,16 +439,36 @@ export function Player({
                   }
                 />
                 <DropdownMenuContent align="end">
-                  <DropdownMenuLabel>Playback speed</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  {RATES.map((rate) => (
-                    <DropdownMenuItem key={rate} onClick={() => send({ kind: 'set_rate', rate })}>
-                      {rate}×{rate === (timeline?.rate ?? 1) ? ' ·' : ''}
-                    </DropdownMenuItem>
-                  ))}
+                  {/* The label is a `GroupLabel`, which throws outside a
+                      `Group` — it is labelling something, and the primitive
+                      insists on being told what. */}
+                  <DropdownMenuGroup>
+                    <DropdownMenuLabel>Playback speed</DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    {RATES.map((rate) => (
+                      <DropdownMenuItem key={rate} onClick={() => send({ kind: 'set_rate', rate })}>
+                        {rate}×{rate === (timeline?.rate ?? 1) ? ' ·' : ''}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
             )}
+
+            {onTheatre ? (
+              <ControlButton
+                label={theatre ? 'Exit theatre mode' : 'Theatre mode'}
+                aria-pressed={theatre}
+                onClick={onTheatre}
+                className={cn(theatre && 'bg-white/20 hover:bg-white/25')}
+              >
+                {theatre ? (
+                  <RectangleHorizontal className="size-5" />
+                ) : (
+                  <Frame className="size-5" />
+                )}
+              </ControlButton>
+            ) : null}
 
             <ControlButton
               label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
@@ -648,6 +704,8 @@ function StatusOverlay({
   error,
   paused,
   canControl,
+  source,
+  drivable,
   onSkip,
 }: {
   awaiting: boolean;
@@ -655,6 +713,8 @@ function StatusOverlay({
   error: string | null;
   paused: boolean;
   canControl: boolean;
+  source: MediaSource;
+  drivable: boolean;
   onSkip: () => void;
 }) {
   if (error) {
@@ -684,17 +744,40 @@ function StatusOverlay({
     );
   }
 
-  if (!paused) return null;
+  if (!paused || !drivable) return null;
 
-  // A paused room gets an unmissable target. This is the affordance the old
-  // player hid behind a hover-only bar.
+  // A paused YouTube embed draws a grid of related videos over the picture, and
+  // no player parameter turns it off — `rel=0` only narrows it to the same
+  // channel. The only thing that works is covering the iframe, so a paused
+  // YouTube video gets its own poster frame instead of YouTube's shop window.
+  const poster = source.kind === 'youtube' && source.videoId ? posterFor(source.videoId) : null;
+
   return (
-    <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center">
-      <span className="grid size-16 place-items-center rounded-full bg-black/55 backdrop-blur-sm">
+    <div
+      className={cn(
+        'pointer-events-none absolute inset-0 z-20 grid place-items-center',
+        poster ? 'bg-black bg-cover bg-center' : 'bg-black/30',
+      )}
+      style={poster ? { backgroundImage: `url(${poster})` } : undefined}
+    >
+      {/* Dimmed so the play button reads against a bright thumbnail. */}
+      {poster ? <span className="absolute inset-0 bg-black/45" /> : null}
+      <span className="relative grid size-16 place-items-center rounded-full bg-black/55 backdrop-blur-sm">
         <Play className="size-7 fill-white text-white" />
       </span>
     </div>
   );
+}
+
+/**
+ * A still for a paused YouTube video.
+ *
+ * `hqdefault` rather than `maxresdefault`: the latter is missing for a lot of
+ * older and lower-resolution uploads, and a 404 here would show a broken
+ * backdrop instead of covering the thing it exists to cover.
+ */
+function posterFor(videoId: string): string {
+  return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 }
 
 function ControlButton({
@@ -758,6 +841,12 @@ function firstThumb(value: number | readonly number[]): number | undefined {
 /** A usable name for a source the queue could not name for us. */
 function titleFromSource(source: MediaSource): string {
   if (source.kind === 'youtube') return 'YouTube video';
+  if (source.kind === 'twitch' || source.kind === 'kick') {
+    // The canonical URL is `<platform>/<channel>` or `/videos/<id>`, so the
+    // last segment is the most useful name available before metadata arrives.
+    const name = source.url.split('/').filter(Boolean).pop();
+    return name ?? (source.kind === 'twitch' ? 'Twitch' : 'Kick');
+  }
   try {
     const { pathname, hostname } = new URL(source.url);
     const file = pathname.split('/').filter(Boolean).pop();
@@ -782,7 +871,11 @@ function describeState({
 }): string {
   if (awaiting) return 'Waiting for everyone to load…';
   if (buffering) return 'Buffering…';
+  // Kick's embed takes no commands from the page, so saying where the controls
+  // are is more useful than naming the channel again.
+  if (source.kind === 'kick') return 'Kick — use the player’s own controls';
   if (nowPlaying?.channelTitle) return nowPlaying.channelTitle;
+  if (source.kind === 'twitch') return 'Twitch';
   if (live) return 'Live stream';
   try {
     return new URL(source.url).hostname;

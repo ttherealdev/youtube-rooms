@@ -23,6 +23,10 @@ pub enum SourceKind {
     Hls,
     /// MPEG-DASH manifest, played via Media Source Extensions.
     Dash,
+    /// Twitch channel or VOD, played through the Twitch embed.
+    Twitch,
+    /// Kick channel, played through the Kick embed.
+    Kick,
 }
 
 impl SourceKind {
@@ -32,6 +36,8 @@ impl SourceKind {
             "file" => Some(Self::File),
             "hls" => Some(Self::Hls),
             "dash" => Some(Self::Dash),
+            "twitch" => Some(Self::Twitch),
+            "kick" => Some(Self::Kick),
             _ => None,
         }
     }
@@ -42,13 +48,20 @@ impl SourceKind {
             Self::File => "file",
             Self::Hls => "hls",
             Self::Dash => "dash",
+            Self::Twitch => "twitch",
+            Self::Kick => "kick",
         }
     }
 
     /// Live sources have no meaningful duration or seek range, so the room
     /// must not try to auto-advance off the end of one.
+    ///
+    /// Twitch is included even though it also serves VODs: a channel URL and a
+    /// VOD URL are indistinguishable in their effect on the room, and treating
+    /// a live channel as seekable is a much worse failure than treating a VOD
+    /// as unseekable.
     pub fn may_be_live(self) -> bool {
-        matches!(self, Self::Hls | Self::Dash)
+        matches!(self, Self::Hls | Self::Dash | Self::Twitch | Self::Kick)
     }
 }
 
@@ -107,6 +120,13 @@ pub fn classify(input: &str) -> Option<Classified> {
     }
 
     let url = rewrite_share_link(&normalize_url(trimmed)?);
+
+    // Platform embeds are matched on host before extension, because these URLs
+    // have no extension at all and would otherwise be attempted as files.
+    if let Some(source) = classify_platform(&url) {
+        return Some(Classified::Source(source));
+    }
+
     let extension = path_extension(&url);
 
     // `.m3u8` is ambiguous — it is both the HLS manifest extension and a
@@ -143,6 +163,98 @@ pub fn classify(input: &str) -> Option<Classified> {
         url,
         video_id: None,
     }))
+}
+
+/// Twitch and Kick, which only play inside their own embed.
+///
+/// Both are matched by host and canonicalised to the shape their embed expects,
+/// so the client can read the channel or video straight off the URL rather than
+/// re-deriving it from whatever the user happened to paste. Paths that are not
+/// channels — Twitch's `/directory`, `/settings`, and so on — fall through and
+/// are refused rather than being embedded as a broken player.
+fn classify_platform(url: &str) -> Option<MediaSource> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let host = host.trim_start_matches("www.").trim_start_matches("m.");
+    let segments: Vec<&str> = parsed
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+
+    match host {
+        "twitch.tv" | "player.twitch.tv" => match segments.as_slice() {
+            // A VOD: twitch.tv/videos/1234567890
+            ["videos", id] if is_plain_id(id) => Some(MediaSource {
+                kind: SourceKind::Twitch,
+                url: format!("https://www.twitch.tv/videos/{id}"),
+                video_id: None,
+            }),
+            // A live channel: twitch.tv/<channel>
+            [channel] if is_channel_name(channel) => Some(MediaSource {
+                kind: SourceKind::Twitch,
+                url: format!("https://www.twitch.tv/{}", channel.to_ascii_lowercase()),
+                video_id: None,
+            }),
+            _ => None,
+        },
+
+        // Kick has channels and nothing else worth embedding; its clips and
+        // VODs are not addressable through the public player.
+        "kick.com" | "player.kick.com" => match segments.as_slice() {
+            [channel] if is_channel_name(channel) => Some(MediaSource {
+                kind: SourceKind::Kick,
+                url: format!("https://kick.com/{}", channel.to_ascii_lowercase()),
+                video_id: None,
+            }),
+            _ => None,
+        },
+
+        _ => None,
+    }
+}
+
+/// Reserved first path segments that are pages, not channels.
+///
+/// Both platforms reserve these names, so nothing here can collide with a real
+/// channel. The list only has to cover what someone might plausibly paste —
+/// anything missed embeds a broken player rather than doing harm, and anything
+/// over-matched refuses a URL the user can still paste as a direct stream.
+const NOT_CHANNELS: [&str; 18] = [
+    // Twitch
+    "directory",
+    "settings",
+    "downloads",
+    "subscriptions",
+    "wallet",
+    "drops",
+    "friends",
+    "videos",
+    "clips",
+    // Kick
+    "browse",
+    "categories",
+    "following",
+    "messages",
+    "clips-feed",
+    // Both
+    "search",
+    "about",
+    "login",
+    "signup",
+];
+
+fn is_channel_name(segment: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    !NOT_CHANNELS.contains(&lower.as_str())
+        && !lower.is_empty()
+        && lower.len() <= 40
+        && lower
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_plain_id(segment: &str) -> bool {
+    !segment.is_empty() && segment.len() <= 20 && segment.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Accept only absolute http(s) URLs, and hand back the parsed form.
@@ -374,8 +486,62 @@ mod tests {
     fn only_streaming_kinds_may_be_live() {
         assert!(SourceKind::Hls.may_be_live());
         assert!(SourceKind::Dash.may_be_live());
+        assert!(SourceKind::Twitch.may_be_live());
+        assert!(SourceKind::Kick.may_be_live());
         assert!(!SourceKind::File.may_be_live());
         assert!(!SourceKind::Youtube.may_be_live());
+    }
+
+    #[test]
+    fn twitch_channels_and_vods_are_canonicalised() {
+        for input in [
+            "https://twitch.tv/Shroud",
+            "https://www.twitch.tv/shroud",
+            "https://m.twitch.tv/shroud",
+            "twitch.tv/shroud",
+        ] {
+            let s = source(input);
+            assert_eq!(s.kind, SourceKind::Twitch, "failed on {input}");
+            // Canonical and lowercased, so the client never has to re-derive it.
+            assert_eq!(s.url, "https://www.twitch.tv/shroud", "failed on {input}");
+        }
+
+        let vod = source("https://www.twitch.tv/videos/1234567890");
+        assert_eq!(vod.kind, SourceKind::Twitch);
+        assert_eq!(vod.url, "https://www.twitch.tv/videos/1234567890");
+    }
+
+    #[test]
+    fn kick_channels_are_canonicalised() {
+        for input in ["https://kick.com/Xqc", "kick.com/xqc", "https://www.kick.com/xqc"] {
+            let s = source(input);
+            assert_eq!(s.kind, SourceKind::Kick, "failed on {input}");
+            assert_eq!(s.url, "https://kick.com/xqc", "failed on {input}");
+        }
+    }
+
+    #[test]
+    fn platform_pages_that_are_not_channels_are_refused() {
+        // Embedding these yields a broken player rather than an error, which is
+        // a worse outcome than refusing the paste.
+        for input in [
+            "https://www.twitch.tv/directory/game/Chess",
+            "https://www.twitch.tv/settings",
+            "https://kick.com/browse",
+            "https://www.twitch.tv/videos/not-a-number",
+        ] {
+            let classified = classify(input);
+            assert!(
+                !matches!(
+                    classified,
+                    Some(Classified::Source(MediaSource {
+                        kind: SourceKind::Twitch | SourceKind::Kick,
+                        ..
+                    }))
+                ),
+                "embedded {input} as a channel: {classified:?}"
+            );
+        }
     }
 
     #[test]

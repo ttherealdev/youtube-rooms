@@ -18,6 +18,7 @@ import { type RoomShortcutActions, useRoomShortcuts } from '~/hooks/use-room-sho
 import { useSession } from '~/hooks/use-session';
 import { api } from '~/lib/api';
 import { asThemeKey, asThemeMode } from '~/lib/themes';
+import { cn } from '~/lib/utils';
 import type { PlayerEngine } from '~/realtime/player/engine';
 import { RoomSocket } from '~/realtime/socket';
 import { useConnection, usePermissions, useRoomStore } from '~/stores/room-store';
@@ -34,6 +35,7 @@ export function RoomShell({ slug }: { slug: string }) {
   const [socket, setSocket] = useState<RoomSocket | null>(null);
   const [engine, setEngine] = useState<PlayerEngine | null>(null);
   const [panel, setPanel] = useState<'chat' | 'queue' | 'people' | 'settings'>('chat');
+  const [theatre, setTheatre] = useTheatreMode();
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const playerRef = useRef<HTMLDivElement>(null);
   const apply = useRoomStore((s) => s.apply);
@@ -86,7 +88,7 @@ export function RoomShell({ slug }: { slug: string }) {
   useRoomShortcuts({
     socket,
     engine,
-    actions: useShortcutActions({ setPanel, chatInputRef, playerRef }),
+    actions: useShortcutActions({ setPanel, chatInputRef, playerRef, setTheatre }),
   });
 
   if (lookup.isPending) {
@@ -174,12 +176,32 @@ export function RoomShell({ slug }: { slug: string }) {
         </Button>
       </header>
 
-      <div className="grid min-h-0 flex-1 lg:grid-cols-[1fr_380px]">
-        <main ref={playerRef} className="min-h-0 overflow-y-auto p-4">
-          <Player socket={socket} onEngine={setEngine} />
+      {/* Theatre mode drops to one column and lets the player have the width;
+          the panels move underneath rather than disappearing, because a room
+          where you cannot see the chat is a worse room, not a cinema. */}
+      <div
+        className={cn(
+          'grid min-h-0 flex-1',
+          theatre ? 'grid-rows-[auto_minmax(0,1fr)]' : 'lg:grid-cols-[1fr_380px]',
+        )}
+      >
+        <main
+          ref={playerRef}
+          className={cn('min-h-0 overflow-y-auto', theatre ? 'bg-black p-0' : 'p-4')}
+        >
+          <div className={cn(theatre && 'mx-auto max-h-[72dvh] w-full max-w-[min(100%,160dvh)]')}>
+            <Player
+              socket={socket}
+              onEngine={setEngine}
+              theatre={theatre}
+              onTheatre={() => setTheatre((on) => !on)}
+            />
+          </div>
         </main>
 
-        <aside className="flex min-h-0 flex-col border-t lg:border-t-0 lg:border-l">
+        <aside
+          className={cn('flex min-h-0 flex-col border-t', !theatre && 'lg:border-t-0 lg:border-l')}
+        >
           <Tabs
             value={panel}
             onValueChange={(next) => setPanel((next as typeof panel) ?? 'chat')}
@@ -235,10 +257,12 @@ function useShortcutActions({
   setPanel,
   chatInputRef,
   playerRef,
+  setTheatre,
 }: {
   setPanel: (panel: 'chat' | 'queue' | 'people' | 'settings') => void;
   chatInputRef: React.RefObject<HTMLTextAreaElement | null>;
   playerRef: React.RefObject<HTMLDivElement | null>;
+  setTheatre: React.Dispatch<React.SetStateAction<boolean>>;
 }): RoomShortcutActions {
   const focusChat = useCallback(() => {
     setPanel('chat');
@@ -252,15 +276,49 @@ function useShortcutActions({
       focusSearch: () => setPanel('queue'),
       showPanel: (next) => setPanel(next),
       toggleHelp: () =>
-        toast.info('Shortcuts: space play/pause · ←/→ seek · f fullscreen · c chat'),
+        toast.info(
+          'Shortcuts: space play/pause · ←/→ seek · f fullscreen · t theatre · c chat · q queue',
+        ),
       requestFullscreen: () => {
         const node = playerRef.current?.querySelector('[class*="aspect-video"]');
         if (node instanceof HTMLElement) void node.requestFullscreen().catch(() => undefined);
       },
+      toggleTheatre: () => setTheatre((on) => !on),
     }),
-    [focusChat, setPanel, playerRef],
+    [focusChat, setPanel, playerRef, setTheatre],
   );
 }
+
+/**
+ * Theatre mode, remembered across rooms and reloads.
+ *
+ * A layout preference, not room state: it is about this person's screen, so it
+ * never touches the socket. Read in an effect rather than during render — the
+ * server has no `localStorage`, and reading it inline would break hydration.
+ */
+function useTheatreMode(): [boolean, React.Dispatch<React.SetStateAction<boolean>>] {
+  const [theatre, setTheatre] = useState(false);
+
+  useEffect(() => {
+    try {
+      setTheatre(localStorage.getItem(THEATRE_KEY) === '1');
+    } catch {
+      /* Private mode blocks storage; the default is already correct. */
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(THEATRE_KEY, theatre ? '1' : '0');
+    } catch {
+      /* Nothing to do — the preference simply will not persist. */
+    }
+  }, [theatre]);
+
+  return [theatre, setTheatre];
+}
+
+const THEATRE_KEY = 'playercn:theatre';
 
 /**
  * Apply the room's theme while inside it, and hand control back on the way out.

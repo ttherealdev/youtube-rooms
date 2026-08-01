@@ -100,7 +100,28 @@ export function loadYouTubeApi(): Promise<YouTubeApi> {
   return loader;
 }
 
-/** Player parameters. Chosen to keep YouTube's own chrome out of the way. */
+/**
+ * Privacy-enhanced host.
+ *
+ * Same player, no cookies until something actually plays. Passed explicitly
+ * because the API defaults to the tracking host.
+ */
+export const PLAYER_HOST = 'https://www.youtube-nocookie.com';
+
+/**
+ * Player parameters. Chosen to keep YouTube's own chrome out of the way.
+ *
+ * What these can and cannot do is worth being honest about. They remove the
+ * control bar, the keyboard handlers, annotations and info cards. They do
+ * **not** remove the related-video grid YouTube draws over a *paused* or
+ * *ended* video — `rel=0` has meant "related videos from this channel only"
+ * rather than "no related videos" since 2018, and there is no parameter that
+ * turns it off. The room covers the iframe instead; see the player's paused
+ * backdrop.
+ *
+ * The "Includes paid promotion" badge is also not removable, and should not
+ * be: it is a sponsorship disclosure the uploader is obliged to show.
+ */
 export const PLAYER_VARS = {
   autoplay: 0,
   controls: 0,

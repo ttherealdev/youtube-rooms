@@ -24,6 +24,7 @@ export interface RoomShortcutActions {
   showPanel: (panel: 'chat' | 'queue' | 'people') => void;
   toggleHelp: () => void;
   requestFullscreen: () => void;
+  toggleTheatre: () => void;
 }
 
 type SyncAction = Extract<ClientMessage, { t: 'sync_intent' }>['action'];
@@ -143,6 +144,11 @@ export function useRoomShortcuts({
         case 'f':
         case 'F':
           actions.requestFullscreen();
+          return;
+
+        case 't':
+        case 'T':
+          actions.toggleTheatre();
           return;
 
         // --- Panels --------------------------------------------------------
