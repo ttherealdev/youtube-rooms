@@ -52,7 +52,7 @@ If you read one section, read [How synchronisation works](#how-synchronisation-w
 **Prerequisites:** Rust 1.90+, Node 22+, pnpm 11+, Docker.
 
 ```bash
-git clone <repo> playercn && cd playercn
+git clone https://github.com/ttherealdev/playercn/ playercn && cd playercn
 
 pnpm install
 ./scripts/gen-keys.sh          # Ed25519 keypair for signing access tokens
