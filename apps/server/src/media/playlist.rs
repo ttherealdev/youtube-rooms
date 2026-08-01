@@ -1,9 +1,13 @@
 //! Playlist parsing.
 //!
-//! "Paste a list URL and load everything on it" is the IPTV/VLC workflow, and
-//! the two formats that carry those lists in practice are extended M3U and PLS.
-//! Both are line-oriented text, so this module is pure string handling and is
-//! tested exhaustively without a network.
+//! "Paste a list URL and load everything on it" is the IPTV/VLC workflow. Four
+//! formats carry those lists in practice: extended M3U and PLS, which are
+//! line-oriented text, and XSPF and ASX, which are the XML files desktop
+//! players export. Everything here is pure string handling and is tested
+//! exhaustively without a network.
+//!
+//! The format is sniffed from the *body*, not the extension, because these
+//! files get renamed constantly.
 //!
 //! The subtle part is `.m3u8`. That extension names *two* different things: an
 //! HLS manifest, which is a single stream, and a UTF-8 playlist container,
@@ -49,7 +53,122 @@ pub fn parse(body: &str, base: &str) -> Parsed {
         return Parsed::Entries(parse_pls(body, base));
     }
 
+    // Sniffed from content rather than from the extension: these are what a
+    // desktop player exports, and people rename them freely.
+    let head = trimmed.get(..512).unwrap_or(trimmed).to_ascii_lowercase();
+    if head.contains("<playlist") && head.contains("xspf") {
+        return Parsed::Entries(parse_xspf(body, base));
+    }
+    if head.contains("<asx") {
+        return Parsed::Entries(parse_asx(body, base));
+    }
+
     Parsed::Entries(parse_m3u(body, base))
+}
+
+/// XSPF — the XML playlist VLC and Clementine export.
+///
+/// Deliberately not a real XML parse. The format is regular enough that pulling
+/// `<location>` and `<title>` out of each `<track>` covers every file these
+/// players actually write, and adding an XML dependency to read two tags would
+/// be a poor trade against the parsing surface it brings with it.
+fn parse_xspf(body: &str, base: &str) -> Vec<PlaylistEntry> {
+    let mut entries = Vec::new();
+
+    for chunk in split_blocks(body, "<track") {
+        let Some(location) = tag_text(&chunk, "location") else {
+            continue;
+        };
+        let title = tag_text(&chunk, "title");
+        push_entry(&mut entries, location.trim(), title.as_deref(), None, None, base);
+        if entries.len() >= MAX_ENTRIES {
+            break;
+        }
+    }
+
+    entries
+}
+
+/// ASX — the Windows Media playlist. Entries are attributes, not text nodes.
+fn parse_asx(body: &str, base: &str) -> Vec<PlaylistEntry> {
+    let mut entries = Vec::new();
+
+    for chunk in split_blocks(body, "<entry") {
+        let Some(href) = attribute_of(&chunk, "ref", "href") else {
+            continue;
+        };
+        let title = tag_text(&chunk, "title");
+        push_entry(&mut entries, href.trim(), title.as_deref(), None, None, base);
+        if entries.len() >= MAX_ENTRIES {
+            break;
+        }
+    }
+
+    entries
+}
+
+/// Split a body on a case-insensitive opening tag, dropping the preamble.
+fn split_blocks(body: &str, open: &str) -> Vec<String> {
+    let lower = body.to_ascii_lowercase();
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(found) = lower[cursor..].find(open) {
+        let start = cursor + found;
+        let next = lower[start + open.len()..]
+            .find(open)
+            .map(|offset| start + open.len() + offset)
+            .unwrap_or(body.len());
+        blocks.push(body[start..next].to_string());
+        cursor = next;
+        if cursor >= body.len() {
+            break;
+        }
+    }
+
+    blocks
+}
+
+/// Text content of the first `<name>…</name>`, case-insensitively.
+fn tag_text(chunk: &str, name: &str) -> Option<String> {
+    let lower = chunk.to_ascii_lowercase();
+    let open = format!("<{name}");
+    let close = format!("</{name}");
+
+    let start = lower.find(&open)?;
+    let content = start + chunk[start..].find('>')? + 1;
+    let end = lower[content..].find(&close)? + content;
+    let text = chunk.get(content..end)?.trim();
+    (!text.is_empty()).then(|| unescape_xml(text))
+}
+
+/// Value of `attr` on the first `<tag …>`, case-insensitively.
+fn attribute_of(chunk: &str, tag: &str, attr: &str) -> Option<String> {
+    let lower = chunk.to_ascii_lowercase();
+    let start = lower.find(&format!("<{tag}"))?;
+    let end = start + chunk[start..].find('>')?;
+    let inside = chunk.get(start..end)?;
+    let lower_inside = inside.to_ascii_lowercase();
+
+    let at = lower_inside.find(&format!("{attr}="))? + attr.len() + 1;
+    let rest = inside.get(at..)?.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let value = rest[1..].split(quote).next()?;
+    (!value.is_empty()).then(|| unescape_xml(value))
+}
+
+/// The five predefined XML entities. Enough for a playlist; these files carry
+/// URLs and titles, not markup.
+fn unescape_xml(input: &str) -> String {
+    input
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 /// An HLS manifest is any body carrying `#EXT-X-` tags.
@@ -60,6 +179,31 @@ pub fn parse(body: &str, base: &str) -> Parsed {
 /// (`#EXT-X-TARGETDURATION`), including future tags.
 fn is_hls_manifest(body: &str) -> bool {
     body.lines().any(|line| line.trim_start().starts_with("#EXT-X-"))
+}
+
+/// Resolve one entry and append it, skipping anything unplayable.
+///
+/// Shared by the XML formats, which discover the same four fields the M3U
+/// parser does but in a different order and from different syntax.
+fn push_entry(
+    entries: &mut Vec<PlaylistEntry>,
+    url: &str,
+    title: Option<&str>,
+    logo: Option<String>,
+    group: Option<String>,
+    base: &str,
+) {
+    let Some(source) = resolve_entry(url, base) else {
+        return;
+    };
+
+    let title = title.map(str::trim).filter(|t| !t.is_empty());
+    entries.push(PlaylistEntry {
+        title: title.map_or_else(|| fallback_title(&source), str::to_string),
+        source,
+        logo,
+        group,
+    });
 }
 
 fn parse_m3u(body: &str, base: &str) -> Vec<PlaylistEntry> {
@@ -242,6 +386,58 @@ mod tests {
             Parsed::Entries(entries) => entries,
             Parsed::HlsManifest => panic!("expected entries, got an HLS manifest"),
         }
+    }
+
+    #[test]
+    fn xspf_tracks_yield_titled_entries() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+<playlist version="1" xmlns="http://xspf.org/ns/0/">
+  <trackList>
+    <track>
+      <location>https://cdn.example.com/news.mp4</location>
+      <title>News &amp; Weather</title>
+    </track>
+    <track>
+      <location>movies.mp4</location>
+    </track>
+  </trackList>
+</playlist>"#;
+
+        let got = entries(body);
+        assert_eq!(got.len(), 2);
+        // The entity has to survive, or every title with an ampersand is wrong.
+        assert_eq!(got[0].title, "News & Weather");
+        assert_eq!(got[0].source.url, "https://cdn.example.com/news.mp4");
+        // Relative entries resolve against the playlist, as in M3U.
+        assert_eq!(got[1].source.url, "https://lists.example.com/tv/movies.mp4");
+    }
+
+    #[test]
+    fn asx_entries_read_their_href_attribute() {
+        let body = r#"<ASX version="3.0">
+  <ENTRY>
+    <TITLE>Station One</TITLE>
+    <REF HREF="https://cdn.example.com/one.mp3" />
+  </ENTRY>
+  <Entry>
+    <Ref href='https://cdn.example.com/two.mp3'/>
+  </Entry>
+</ASX>"#;
+
+        let got = entries(body);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].title, "Station One");
+        assert_eq!(got[0].source.url, "https://cdn.example.com/one.mp3");
+        // Tag case and quote style both vary in the wild.
+        assert_eq!(got[1].source.url, "https://cdn.example.com/two.mp3");
+    }
+
+    #[test]
+    fn an_xml_playlist_with_no_usable_entries_is_empty_not_a_panic() {
+        let body = r#"<playlist version="1" xmlns="http://xspf.org/ns/0/">
+  <trackList><track><title>No location</title></track></trackList>
+</playlist>"#;
+        assert!(entries(body).is_empty());
     }
 
     #[test]

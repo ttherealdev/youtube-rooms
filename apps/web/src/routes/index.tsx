@@ -98,7 +98,7 @@ const FEATURES = [
   {
     icon: ListMusic,
     title: 'Import whole playlists',
-    body: 'Point the room at an M3U or PLS list and every entry lands in the queue at once.',
+    body: 'Point the room at an M3U, PLS, XSPF or ASX list and every entry lands in the queue at once.',
   },
   {
     icon: Users,

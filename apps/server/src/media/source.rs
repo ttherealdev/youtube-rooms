@@ -76,7 +76,11 @@ impl MediaSource {
 
 /// Playlist containers. These are not playable themselves — they expand into
 /// many sources — so classification reports them separately.
-const PLAYLIST_EXTENSIONS: [&str; 2] = ["m3u", "pls"];
+///
+/// `xspf` and `asx` are here because they are what a desktop player exports:
+/// someone moving a watchlist over from VLC or Windows Media Player arrives
+/// with one of these far more often than with an `.m3u`.
+const PLAYLIST_EXTENSIONS: [&str; 4] = ["m3u", "pls", "xspf", "asx"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Classified {
@@ -102,7 +106,7 @@ pub fn classify(input: &str) -> Option<Classified> {
         return Some(Classified::Source(MediaSource::youtube(video_id)));
     }
 
-    let url = normalize_url(trimmed)?;
+    let url = rewrite_share_link(&normalize_url(trimmed)?);
     let extension = path_extension(&url);
 
     // `.m3u8` is ambiguous — it is both the HLS manifest extension and a
@@ -147,13 +151,86 @@ pub fn classify(input: &str) -> Option<Classified> {
 /// and `gopher:` would be fetched by the import path, and `javascript:` would
 /// reach an href on the client.
 fn normalize_url(input: &str) -> Option<String> {
-    let parsed = reqwest::Url::parse(input).ok()?;
+    let parsed = match reqwest::Url::parse(input) {
+        Ok(parsed) => parsed,
+        // People paste `example.com/clip.mp4` and `www.example.com/live.m3u8`
+        // constantly. Retrying under https is only done when the input has no
+        // scheme at all, so `javascript:` and friends still fail below rather
+        // than being rescued into `https://javascript:...`.
+        Err(_) if !input.contains("://") && looks_like_host(input) => {
+            reqwest::Url::parse(&format!("https://{input}")).ok()?
+        }
+        Err(_) => return None,
+    };
+
     match parsed.scheme() {
         "http" | "https" => {}
         _ => return None,
     }
     parsed.host_str()?;
     Some(parsed.to_string())
+}
+
+/// Does this look like `host[/path]` rather than prose or a bare filename?
+fn looks_like_host(input: &str) -> bool {
+    let host = input.split(['/', '?', '#']).next().unwrap_or_default();
+    !host.is_empty()
+        && !host.contains(' ')
+        && host.contains('.')
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+}
+
+/// Turn a "share this file" page URL into something a `<video>` can load.
+///
+/// Cloud drives hand out links to an HTML viewer, not to the bytes. Pasted as
+/// they come, every one of them fails with the browser's opaque "format not
+/// supported" — the file is fine, the URL was simply never media. Each provider
+/// has a documented direct form, so the rewrite happens here, once, instead of
+/// being a support question forever.
+///
+/// Anything unrecognised is returned untouched.
+fn rewrite_share_link(url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let host = host.trim_start_matches("www.");
+
+    match host {
+        // drive.google.com/file/d/<id>/view → the direct download endpoint.
+        // Large files answer this with a virus-scan interstitial instead of the
+        // bytes, which is a Google policy we cannot route around; small and
+        // medium files, which is what people actually share, play.
+        "drive.google.com" => {
+            let segments: Vec<&str> = parsed.path_segments().map(|s| s.collect()).unwrap_or_default();
+            match segments.as_slice() {
+                ["file", "d", id, ..] if !id.is_empty() => {
+                    format!("https://drive.google.com/uc?export=download&id={id}")
+                }
+                _ => url.to_string(),
+            }
+        }
+
+        // Dropbox serves a preview page unless asked otherwise. `raw=1` is the
+        // supported form; the older `dl=1` forces a download, which the browser
+        // then refuses to treat as media.
+        "dropbox.com" | "dl.dropboxusercontent.com" => {
+            let mut out = parsed.clone();
+            let kept: Vec<(String, String)> = parsed
+                .query_pairs()
+                .filter(|(key, _)| key != "dl" && key != "raw")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            out.query_pairs_mut()
+                .clear()
+                .extend_pairs(kept)
+                .append_pair("raw", "1");
+            out.to_string()
+        }
+
+        _ => url.to_string(),
+    }
 }
 
 /// Lowercased extension of the URL's path, ignoring the query string.
@@ -235,6 +312,46 @@ mod tests {
         // VLC's contract: try it rather than refuse it.
         assert_eq!(source("https://example.com/stream").kind, SourceKind::File);
         assert_eq!(source("https://example.com/a.bin").kind, SourceKind::File);
+    }
+
+    #[test]
+    fn a_missing_scheme_is_assumed_to_be_https() {
+        // Copying a URL out of a chat message very often loses the scheme.
+        assert_eq!(source("example.com/clip.mp4").kind, SourceKind::File);
+        assert_eq!(source("www.example.com/live.m3u8").kind, SourceKind::Hls);
+        assert!(source("example.com/clip.mp4").url.starts_with("https://"));
+    }
+
+    #[test]
+    fn desktop_player_playlists_are_recognised() {
+        for input in [
+            "https://example.com/list.xspf",
+            "https://example.com/stations.asx",
+        ] {
+            assert!(
+                matches!(classify(input), Some(Classified::Playlist { .. })),
+                "failed on {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_share_links_become_direct_media_urls() {
+        let drive = source("https://drive.google.com/file/d/1AbCdEfGhIjK/view?usp=sharing");
+        assert_eq!(drive.url, "https://drive.google.com/uc?export=download&id=1AbCdEfGhIjK");
+
+        // The preview page would otherwise reach a <video> as HTML.
+        let dropbox = source("https://www.dropbox.com/s/abc123/clip.mp4?dl=0");
+        assert!(dropbox.url.contains("raw=1"), "got {}", dropbox.url);
+        assert!(!dropbox.url.contains("dl=0"), "got {}", dropbox.url);
+    }
+
+    #[test]
+    fn an_unrecognised_host_is_left_exactly_as_pasted() {
+        // The rewrite must be a narrow allowlist: silently rewriting arbitrary
+        // URLs would break every self-hosted link.
+        let url = "https://example.com/a.mp4?dl=0&token=x";
+        assert_eq!(source(url).url, url);
     }
 
     #[test]
