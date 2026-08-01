@@ -65,6 +65,15 @@ pub enum ClientMessage {
     ReportDuration {
         seconds: f64,
     },
+
+    /// "My player has this source buffered and can start."
+    ///
+    /// Releases the hold `Timeline::load` puts on a freshly cued source. The
+    /// version identifies which cue is being answered, so a report that was in
+    /// flight while the room moved on cannot start the wrong video.
+    PlaybackReady {
+        version: u64,
+    },
     QueueRemove {
         #[serde(rename = "itemId")]
         item_id: Uuid,

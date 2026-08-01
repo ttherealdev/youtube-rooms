@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Link2, MessageSquare, Settings, Users, Video } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { JoinGate } from '~/components/join-gate';
 import { ChatPanel } from '~/components/room/chat';
@@ -14,9 +14,11 @@ import { Badge } from '~/components/ui/badge';
 import { Button } from '~/components/ui/button';
 import { Spinner } from '~/components/ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '~/components/ui/tabs';
+import { type RoomShortcutActions, useRoomShortcuts } from '~/hooks/use-room-shortcuts';
 import { useSession } from '~/hooks/use-session';
 import { api } from '~/lib/api';
 import { asThemeKey, asThemeMode } from '~/lib/themes';
+import type { PlayerEngine } from '~/realtime/player/engine';
 import { RoomSocket } from '~/realtime/socket';
 import { useConnection, usePermissions, useRoomStore } from '~/stores/room-store';
 
@@ -30,6 +32,10 @@ import { useConnection, usePermissions, useRoomStore } from '~/stores/room-store
 export function RoomShell({ slug }: { slug: string }) {
   const { state: session } = useSession();
   const [socket, setSocket] = useState<RoomSocket | null>(null);
+  const [engine, setEngine] = useState<PlayerEngine | null>(null);
+  const [panel, setPanel] = useState<'chat' | 'queue' | 'people' | 'settings'>('chat');
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const playerRef = useRef<HTMLDivElement>(null);
   const apply = useRoomStore((s) => s.apply);
   const setConnection = useRoomStore((s) => s.setConnection);
   const reset = useRoomStore((s) => s.reset);
@@ -73,6 +79,15 @@ export function RoomShell({ slug }: { slug: string }) {
   }, [roomId, apply, setConnection, reset]);
 
   useRoomTheme(room?.settings.theme, room?.settings.themeMode);
+
+  // Keyboard control. The hook was written for the previous shell and lost its
+  // only caller in the framework move, which quietly removed every shortcut in
+  // the room.
+  useRoomShortcuts({
+    socket,
+    engine,
+    actions: useShortcutActions({ setPanel, chatInputRef, playerRef }),
+  });
 
   if (lookup.isPending) {
     return <Centered>{<Spinner />}</Centered>;
@@ -160,12 +175,16 @@ export function RoomShell({ slug }: { slug: string }) {
       </header>
 
       <div className="grid min-h-0 flex-1 lg:grid-cols-[1fr_380px]">
-        <main className="min-h-0 overflow-y-auto p-4">
-          <Player socket={socket} />
+        <main ref={playerRef} className="min-h-0 overflow-y-auto p-4">
+          <Player socket={socket} onEngine={setEngine} />
         </main>
 
         <aside className="flex min-h-0 flex-col border-t lg:border-t-0 lg:border-l">
-          <Tabs defaultValue="chat" className="flex min-h-0 flex-1 flex-col">
+          <Tabs
+            value={panel}
+            onValueChange={(next) => setPanel((next as typeof panel) ?? 'chat')}
+            className="flex min-h-0 flex-1 flex-col"
+          >
             <TabsList className="m-2 shrink-0">
               <TabsTrigger value="chat">
                 <MessageSquare className="size-4" />
@@ -203,6 +222,43 @@ export function RoomShell({ slug }: { slug: string }) {
         </aside>
       </div>
     </div>
+  );
+}
+
+/**
+ * Bind the shortcut hook's abstract actions to this shell's concrete parts.
+ *
+ * Memoised because the hook re-registers its key listener whenever the actions
+ * change identity, and an object literal would be a new one every render.
+ */
+function useShortcutActions({
+  setPanel,
+  chatInputRef,
+  playerRef,
+}: {
+  setPanel: (panel: 'chat' | 'queue' | 'people' | 'settings') => void;
+  chatInputRef: React.RefObject<HTMLTextAreaElement | null>;
+  playerRef: React.RefObject<HTMLDivElement | null>;
+}): RoomShortcutActions {
+  const focusChat = useCallback(() => {
+    setPanel('chat');
+    // After the panel switch has painted, or the field does not exist yet.
+    requestAnimationFrame(() => chatInputRef.current?.focus());
+  }, [setPanel, chatInputRef]);
+
+  return useMemo<RoomShortcutActions>(
+    () => ({
+      focusChat,
+      focusSearch: () => setPanel('queue'),
+      showPanel: (next) => setPanel(next),
+      toggleHelp: () =>
+        toast.info('Shortcuts: space play/pause · ←/→ seek · f fullscreen · c chat'),
+      requestFullscreen: () => {
+        const node = playerRef.current?.querySelector('[class*="aspect-video"]');
+        if (node instanceof HTMLElement) void node.requestFullscreen().catch(() => undefined);
+      },
+    }),
+    [focusChat, setPanel, playerRef],
   );
 }
 

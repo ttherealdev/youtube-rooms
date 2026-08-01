@@ -38,6 +38,15 @@ export interface PlayerEngine {
 
 /** What an engine reports back to the room, independently of the sync loop. */
 export interface EngineEvents {
+  /**
+   * Fired once, when this player could actually start rendering the source.
+   *
+   * The room holds a freshly cued source until it hears this from someone —
+   * see `Timeline.awaitingStart`. Without it the timeline starts advancing the
+   * moment a source loads, which on a large file means the room reaches the end
+   * before any player has decoded a frame.
+   */
+  onReady?: () => void;
   /** Fired once the length becomes known. Live sources never fire it. */
   onDurationChange?: (seconds: number) => void;
   /** Playback reached the end of the media. */

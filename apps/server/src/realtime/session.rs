@@ -174,6 +174,10 @@ impl Session {
                 self.handle_report_duration(seconds).await
             }
 
+            ClientMessage::PlaybackReady { version } => {
+                self.handle_playback_ready(version).await
+            }
+
             ClientMessage::QueueRemove { item_id } => {
                 self.require(self.permissions.can_manage_queue, "You cannot edit the queue.")?;
                 db::queue::remove(&self.state.db, self.room.id, item_id).await?;
@@ -720,6 +724,31 @@ impl Session {
         // Only the first report changes anything, so this does not turn into a
         // broadcast per client per video.
         if accepted {
+            self.publish_timeline(TimelineReason::Advance, None).await;
+        }
+        Ok(())
+    }
+
+    /// Start a cued source once a player reports it can actually play it.
+    ///
+    /// Anyone may release the hold, not only someone with playback control: the
+    /// question being answered is "has this loaded anywhere", and refusing a
+    /// viewer's report would leave a room full of people staring at a video
+    /// that never starts because the host happens to be on a slow connection.
+    async fn handle_playback_ready(&mut self, version: u64) -> Result<(), AppError> {
+        let started = {
+            let mut state = self.room.state.lock().await;
+            match state.timeline.as_mut() {
+                // A stale report — the room cued something else while this was
+                // in flight — must not start the video that replaced it.
+                Some(timeline) if timeline.version == version => {
+                    timeline.start_playback(util::now_ms())
+                }
+                _ => false,
+            }
+        };
+
+        if started {
             self.publish_timeline(TimelineReason::Advance, None).await;
         }
         Ok(())

@@ -29,6 +29,12 @@ export const timeline = z.object({
    * live stream stays `null` forever.
    */
   duration: z.number().nullable(),
+  /**
+   * The source is cued but held: the room is waiting for a player to report it
+   * can start. Position stays at zero throughout, so a large file is not
+   * skipped before anyone has downloaded a frame of it.
+   */
+  awaitingStart: z.boolean(),
 });
 export type Timeline = z.infer<typeof timeline>;
 

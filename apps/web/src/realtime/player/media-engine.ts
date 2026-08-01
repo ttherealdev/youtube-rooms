@@ -31,6 +31,13 @@ export class MediaEngine implements PlayerEngine {
     this.#events = events;
     this.kind = source.kind;
 
+    // The room now waits for `onReady` before it starts the clock, so the
+    // element has to actually go and fetch something. Left at the browser
+    // default of `metadata`, a plain file loads its header, fires
+    // `loadedmetadata`, and then sits there — the room starts, playback begins
+    // from an empty buffer, and the first thing the viewer sees is a stall.
+    video.preload = 'auto';
+
     this.#bindEvents();
     void this.#attachSource(source);
   }
@@ -47,7 +54,7 @@ export class MediaEngine implements PlayerEngine {
     };
 
     on('loadedmetadata', () => {
-      this.#ready = true;
+      this.#markReady();
       const duration = usableDuration(video.duration);
       if (duration !== null) this.#events.onDurationChange?.(duration);
     });
@@ -63,11 +70,11 @@ export class MediaEngine implements PlayerEngine {
     on('waiting', () => this.#setBuffering(true));
     on('stalled', () => this.#setBuffering(true));
     on('playing', () => {
-      this.#ready = true;
+      this.#markReady();
       this.#setBuffering(false);
     });
     on('canplay', () => {
-      this.#ready = true;
+      this.#markReady();
       this.#setBuffering(false);
     });
 
@@ -81,6 +88,19 @@ export class MediaEngine implements PlayerEngine {
     });
   }
 
+  /**
+   * Announce readiness exactly once.
+   *
+   * Three different events can be the first to prove the source is playable —
+   * `loadedmetadata`, `canplay` and `playing` — and which one wins varies by
+   * container and browser. The room only wants to be told the first time.
+   */
+  #markReady(): void {
+    if (this.#ready) return;
+    this.#ready = true;
+    this.#events.onReady?.();
+  }
+
   #setBuffering(next: boolean): void {
     if (this.#buffering === next) return;
     this.#buffering = next;
@@ -92,6 +112,9 @@ export class MediaEngine implements PlayerEngine {
 
     if (source.kind === 'file') {
       video.src = source.url;
+      // Explicit: assigning `src` on an element that already played something
+      // does not always restart the resource selection algorithm on its own.
+      video.load();
       return;
     }
 

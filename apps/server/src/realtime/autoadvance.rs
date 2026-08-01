@@ -26,6 +26,16 @@ use tokio::sync::mpsc;
 /// check is a lock and a subtraction per owned room.
 const TICK: Duration = Duration::from_secs(1);
 
+/// How long a cued source waits for someone to report they can play it before
+/// the room starts anyway.
+///
+/// The hold exists so a big file is not skipped before anyone can see it; this
+/// bound exists so the opposite failure is impossible. A source nobody can play
+/// — a dead link, a codec no one has — would otherwise leave the room parked on
+/// it forever with no way forward, since auto-advance only fires on a timeline
+/// that is running.
+const START_TIMEOUT_MS: i64 = 20_000;
+
 pub async fn run(state: AppState) {
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -49,6 +59,25 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
         // Skip empty rooms: advancing a queue nobody is watching burns
         // database writes and consumes the queue before people return.
         if room.participant_count().await == 0 {
+            continue;
+        }
+
+        // Release a cue that nobody answered, before anything else looks at
+        // whether the video has ended — a held timeline is paused, so every
+        // check below would otherwise skip it in perpetuity.
+        let released = {
+            let mut state_guard = room.state.lock().await;
+            match state_guard.timeline.as_mut() {
+                Some(timeline) if timeline.start_overdue(now, START_TIMEOUT_MS) => {
+                    timeline.start_playback(now)
+                }
+                _ => false,
+            }
+        };
+
+        if released {
+            tracing::debug!(room = %room_id, "no player reported ready; starting anyway");
+            broadcast_current(state, &room).await;
             continue;
         }
 

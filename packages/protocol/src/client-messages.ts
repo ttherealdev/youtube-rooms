@@ -74,6 +74,18 @@ const reportDuration = z.object({
   seconds: z.number().positive().finite(),
 });
 
+/**
+ * "My player has this source buffered and can start."
+ *
+ * Releases the hold the server puts on a freshly cued source. The version says
+ * which cue is being answered, so a report still in flight when the room moves
+ * on cannot start the video that replaced it.
+ */
+const playbackReady = z.object({
+  t: z.literal('playback_ready'),
+  version: z.number().int().min(0),
+});
+
 const queueRemove = z.object({ t: z.literal('queue_remove'), itemId: uuid });
 
 const queueMove = z.object({
@@ -158,6 +170,7 @@ export const clientMessage = z.discriminatedUnion('t', [
   queueAdd,
   queueImport,
   reportDuration,
+  playbackReady,
   queueRemove,
   queueMove,
   queueClear,

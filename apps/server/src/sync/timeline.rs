@@ -45,6 +45,20 @@ pub struct Timeline {
     /// Duration of the loaded video, when known. Used to clamp seeks and to
     /// decide when the video has ended.
     pub duration: Option<f64>,
+    /// The source is cued but has not started: the room is waiting for someone
+    /// to report that they can actually play it.
+    ///
+    /// Without this the timeline began advancing the instant a source loaded,
+    /// which is a race nobody can win on a large file. A 9-second 15 Mbps clip
+    /// is ~19 MB, so the room would reach the end — and auto-advance past it —
+    /// while every player in it was still downloading the first frame. The
+    /// symptom was a scrubber that ran to the end over a black rectangle.
+    #[serde(rename = "awaitingStart")]
+    pub awaiting_start: bool,
+    /// Server clock the current source was cued at, so a room whose players
+    /// never report ready can be started anyway rather than waiting forever.
+    #[serde(skip)]
+    pub cued_at: i64,
 }
 
 impl Timeline {
@@ -60,6 +74,8 @@ impl Timeline {
             queue_item_id: None,
             loop_current: false,
             duration: None,
+            awaiting_start: false,
+            cued_at: now_ms,
         }
     }
 
@@ -111,6 +127,10 @@ impl Timeline {
         if self.source.is_none() {
             return;
         }
+        // Any deliberate transport command ends the wait, whoever sent it and
+        // whatever the players have reported. Someone pressing play is a
+        // stronger signal than any readiness heuristic.
+        self.awaiting_start = false;
         self.reanchor(now_ms);
         self.paused = false;
     }
@@ -119,6 +139,7 @@ impl Timeline {
         if self.source.is_none() {
             return;
         }
+        self.awaiting_start = false;
         self.reanchor(now_ms);
         self.paused = true;
     }
@@ -127,6 +148,7 @@ impl Timeline {
         if self.source.is_none() {
             return;
         }
+        self.awaiting_start = false;
         // Take the anchor first so the version bump and clamping stay in one place.
         self.reanchor(now_ms);
         self.anchor_pos = self.clamp_position(position.max(0.0));
@@ -148,7 +170,11 @@ impl Timeline {
         self.version += 1;
     }
 
-    /// Load a source and begin playing from the start.
+    /// Cue a source at position zero, held until someone can play it.
+    ///
+    /// Deliberately *not* playing. See `awaiting_start`: starting the clock
+    /// here means racing every viewer's download, and on a large file the room
+    /// wins that race and skips a video nobody ever saw.
     pub fn load(
         &mut self,
         now_ms: i64,
@@ -161,8 +187,29 @@ impl Timeline {
         self.duration = duration;
         self.anchor_pos = 0.0;
         self.anchor_at = now_ms;
-        self.paused = false;
+        self.paused = true;
+        self.awaiting_start = true;
+        self.cued_at = now_ms;
         self.version += 1;
+    }
+
+    /// Release the hold and start playing.
+    ///
+    /// Returns false when there was nothing to release, so callers can skip a
+    /// broadcast rather than churning the version on every late report — with
+    /// forty people in a room, forty clients report ready to the same cue.
+    pub fn start_playback(&mut self, now_ms: i64) -> bool {
+        if !self.awaiting_start || self.source.is_none() {
+            return false;
+        }
+        self.awaiting_start = false;
+        self.play(now_ms);
+        true
+    }
+
+    /// Has the room been waiting longer than it should for a ready report?
+    pub fn start_overdue(&self, now_ms: i64, after_ms: i64) -> bool {
+        self.awaiting_start && self.source.is_some() && now_ms - self.cued_at >= after_ms
     }
 
     /// Record a duration discovered at playback time.
@@ -204,6 +251,7 @@ impl Timeline {
         if self.source.is_none() {
             return;
         }
+        self.awaiting_start = false;
         self.reanchor(now_ms);
         self.anchor_pos = 0.0;
         self.paused = false;
@@ -223,10 +271,72 @@ mod tests {
 
     const T0: i64 = 1_700_000_000_000;
 
+    /// A room already watching something: cued *and* started, since `load`
+    /// alone only cues.
     fn playing() -> Timeline {
+        let mut tl = cued();
+        tl.start_playback(T0);
+        tl
+    }
+
+    /// A source loaded but held, waiting for a player to report it can start.
+    fn cued() -> Timeline {
         let mut tl = Timeline::idle(T0);
         tl.load(T0, MediaSource::youtube("dQw4w9WgXcQ".into()), None, Some(212.0));
         tl
+    }
+
+    #[test]
+    fn a_freshly_loaded_source_is_held_rather_than_played() {
+        let tl = cued();
+        assert!(tl.awaiting_start);
+        assert!(tl.paused);
+        // The whole point: the clock must not have moved while players load.
+        assert_eq!(tl.position_at(T0 + 30_000), 0.0);
+    }
+
+    #[test]
+    fn a_ready_report_starts_the_clock_from_zero() {
+        let mut tl = cued();
+        assert!(tl.start_playback(T0 + 8_000));
+        assert!(!tl.awaiting_start);
+        assert!((tl.position_at(T0 + 13_000) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn only_the_first_ready_report_does_anything() {
+        let mut tl = cued();
+        assert!(tl.start_playback(T0 + 1_000));
+        // Forty people in a room means forty reports to the same cue; the rest
+        // must not re-anchor the video everyone is already watching.
+        assert!(!tl.start_playback(T0 + 2_000));
+        assert!((tl.position_at(T0 + 3_000) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pressing_play_releases_the_hold_without_waiting_for_a_report() {
+        let mut tl = cued();
+        tl.play(T0 + 5_000);
+        assert!(!tl.awaiting_start);
+        assert!(!tl.paused);
+    }
+
+    #[test]
+    fn a_held_source_becomes_overdue_and_a_started_one_never_does() {
+        let tl = cued();
+        assert!(!tl.start_overdue(T0 + 19_000, 20_000));
+        assert!(tl.start_overdue(T0 + 20_000, 20_000));
+
+        assert!(!playing().start_overdue(T0 + 600_000, 20_000));
+    }
+
+    #[test]
+    fn a_held_source_cannot_end() {
+        // Regression: a 9-second clip used to reach its own end while every
+        // player in the room was still downloading it, and auto-advance then
+        // skipped a video nobody had seen a frame of.
+        let tl = cued();
+        assert!(!tl.has_ended(T0 + 60_000));
     }
 
     #[test]

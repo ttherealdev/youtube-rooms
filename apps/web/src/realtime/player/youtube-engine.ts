@@ -65,6 +65,7 @@ export class YouTubeEngine implements PlayerEngine {
           }
           this.#player = target;
           this.#applyPending();
+          this.#events.onReady?.();
 
           const duration = usableDuration(target.getDuration());
           if (duration !== null) this.#events.onDurationChange?.(duration);
