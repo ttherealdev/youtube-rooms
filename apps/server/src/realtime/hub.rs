@@ -258,6 +258,38 @@ impl Hub {
         }
     }
 
+    /// Republish a user's identity everywhere they are currently present.
+    ///
+    /// A participant carries a *copy* of the user summary, taken when they
+    /// joined, so renaming yourself updates the database and nothing else —
+    /// everyone watching with you keeps seeing the old name until they reload.
+    ///
+    /// Local rooms only. Sessions held by another node keep the stale copy
+    /// until they reconnect, which is a bounded and self-correcting kind of
+    /// wrong: nothing depends on the display name but the display.
+    pub async fn rename_participant(&self, user: &db::users::UserSummary) {
+        let rooms: Vec<Arc<Room>> = self
+            .rooms
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect();
+
+        for room in rooms {
+            let updated = {
+                let mut state = room.state.lock().await;
+                state.participants.get_mut(&user.id).map(|participant| {
+                    participant.user = user.clone();
+                    participant.to_protocol()
+                })
+            };
+
+            if let Some(participant) = updated {
+                self.broadcast(&room, &ServerMessage::ParticipantUpdated { participant })
+                    .await;
+            }
+        }
+    }
+
     /// Tear down a room with no remaining local listeners.
     pub async fn release(&self, room_id: Uuid) {
         let Some(room) = self.get(room_id) else { return };

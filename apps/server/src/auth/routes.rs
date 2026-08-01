@@ -135,7 +135,13 @@ async fn update_profile(
     validate_display_name(&display_name)?;
 
     let user = db::users::rename(&state.db, claims.sub, &display_name).await?;
-    Ok(Json(db::users::UserSummary::from(&user)))
+    let summary = db::users::UserSummary::from(&user);
+
+    // Push it to any room they are sitting in right now, so the change lands in
+    // the participant list and chat header rather than waiting for a reload.
+    state.hub.rename_participant(&summary).await;
+
+    Ok(Json(summary))
 }
 
 /// Rotate the refresh token and mint a new access token.

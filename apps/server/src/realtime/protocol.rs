@@ -257,7 +257,17 @@ pub enum ServerMessage {
     RoomUpdated {
         room: RoomInfo,
     },
+    /// Whose authority changed, and what it is now.
+    ///
+    /// Broadcast rather than sent to one connection: the room has a single
+    /// fan-out path, and a role change has to reach the person it happened to
+    /// even when they are connected to another node. Clients ignore any
+    /// `userId` that is not their own. Nothing is disclosed by the broadcast —
+    /// permissions are a pure function of a role everyone can already see in
+    /// the participant list, and of the room settings.
     PermissionsUpdated {
+        #[serde(rename = "userId")]
+        user_id: Uuid,
         role: String,
         permissions: crate::rooms::permissions::Permissions,
     },

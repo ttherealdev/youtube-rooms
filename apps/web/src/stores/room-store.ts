@@ -197,6 +197,10 @@ export const useRoomStore = create<RoomState>((set, get) => ({
         break;
 
       case 'permissions_updated':
+        // Broadcast to the whole room so it survives a cross-node hop, so this
+        // is where it becomes "mine". Without the guard, being in a room where
+        // someone else is promoted would hand you their authority.
+        if (message.userId !== get().self?.id) return;
         set({ role: message.role, permissions: message.permissions });
         break;
 

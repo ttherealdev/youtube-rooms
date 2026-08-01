@@ -1058,6 +1058,19 @@ impl Session {
 
             self.broadcast(&ServerMessage::ParticipantUpdated { participant })
                 .await;
+
+            // The participant list alone only tells the room what someone's
+            // role is now; it does not tell *them* what they may do. Without
+            // this the promoted person kept their old permissions until they
+            // reloaded the page, which is what made every promotion look like
+            // it had not worked.
+            let settings = self.room.info.read().await.settings.clone();
+            self.broadcast(&ServerMessage::PermissionsUpdated {
+                user_id: target,
+                role: new_role.as_str().to_string(),
+                permissions: permissions::resolve(new_role, &settings),
+            })
+            .await;
         }
 
         Ok(())
@@ -1156,9 +1169,20 @@ impl Session {
                 .await;
         }
 
-        self.reply(&ServerMessage::PermissionsUpdated {
+        // Both sides of the handover need their authority corrected: the
+        // outgoing host is now a co-host, and the incoming one has to be told
+        // they may moderate the room rather than discovering it on reload.
+        self.broadcast(&ServerMessage::PermissionsUpdated {
+            user_id: self.user.id,
             role: self.role.as_str().to_string(),
             permissions: self.permissions,
+        })
+        .await;
+
+        self.broadcast(&ServerMessage::PermissionsUpdated {
+            user_id: target,
+            role: Role::Host.as_str().to_string(),
+            permissions: permissions::resolve(Role::Host, &settings),
         })
         .await;
 

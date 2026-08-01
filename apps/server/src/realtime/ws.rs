@@ -257,6 +257,22 @@ async fn serve(socket: WebSocket, state: AppState, room_id: Uuid) -> anyhow::Res
     }
 
     if reclaimed {
+        // The person who was holding the room keeps co-host, but their
+        // authority just shrank — tell them so, or they keep host-only controls
+        // on screen that the server will now refuse.
+        let settings = room.info.read().await.settings.clone();
+        state
+            .hub
+            .broadcast(
+                &room,
+                &ServerMessage::PermissionsUpdated {
+                    user_id: room_record.host_id,
+                    role: Role::Cohost.as_str().to_string(),
+                    permissions: permissions::resolve(Role::Cohost, &settings),
+                },
+            )
+            .await;
+
         announce_host_change(
             &state,
             &room,
@@ -344,11 +360,14 @@ async fn serve(socket: WebSocket, state: AppState, room_id: Uuid) -> anyhow::Res
             )
             .await;
 
-        // A room without a host cannot be moderated, skipped or reconfigured
-        // by anyone, so the moment the host's last tab closes someone still
-        // present inherits it.
+        // A room without a host cannot be moderated, skipped or reconfigured by
+        // anyone, so someone still present has to inherit it — but not
+        // instantly. A refresh is indistinguishable from a departure at this
+        // layer: both close the socket. Handing the room over immediately meant
+        // every host who reloaded the page came back as an ordinary member,
+        // with their own room in someone else's hands.
         if room.info.read().await.host_id == user.id {
-            promote_after_departure(&state, &room, user.id).await;
+            schedule_host_handover(state.clone(), Arc::clone(&room), user.id);
         }
     }
 
@@ -361,6 +380,44 @@ async fn serve(socket: WebSocket, state: AppState, room_id: Uuid) -> anyhow::Res
 
     state.hub.release(room_id).await;
     Ok(())
+}
+
+/// Wait out the grace period, then hand the room over if the host is really gone.
+///
+/// Detached rather than awaited: the socket that triggered this is already
+/// closing, and blocking its teardown for the length of the grace period would
+/// hold the connection's task open for no reason.
+///
+/// Everything is re-checked after the sleep, because all of it can change while
+/// we wait — the host may reconnect, someone else may be handed the room
+/// explicitly, or the last person may leave and take the room with them.
+fn schedule_host_handover(state: AppState, room: Arc<Room>, departing: Uuid) {
+    let grace = state.config.realtime.host_grace;
+
+    tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+
+        // Reconnected inside the grace period, on this node or another: their
+        // presence is enough, whatever socket it arrived on.
+        if room.state.lock().await.participants.contains_key(&departing) {
+            tracing::debug!(room = %room.id, host = %departing, "host returned within grace");
+            return;
+        }
+
+        // Somebody else already holds the room — an explicit transfer, or the
+        // owner reclaiming it on their way back in.
+        if room.info.read().await.host_id != departing {
+            return;
+        }
+
+        // The room emptied out. The empty-room sweep owns it now, and promoting
+        // a participant who is no longer here would only leave a stale host row.
+        if room.participant_count().await == 0 {
+            return;
+        }
+
+        promote_after_departure(&state, &room, departing).await;
+    });
 }
 
 /// Hand the room to whoever is left after the host disconnects.
@@ -413,6 +470,22 @@ async fn promote_after_departure(state: &AppState, room: &Arc<Room>, departing: 
             .broadcast(room, &ServerMessage::ParticipantUpdated { participant })
             .await;
     }
+
+    // Inheriting a room has to arrive as authority, not just as a label in the
+    // participant list — otherwise the new host sees the badge but none of the
+    // controls until they reload.
+    let settings = room.info.read().await.settings.clone();
+    state
+        .hub
+        .broadcast(
+            room,
+            &ServerMessage::PermissionsUpdated {
+                user_id: next,
+                role: Role::Host.as_str().to_string(),
+                permissions: permissions::resolve(Role::Host, &settings),
+            },
+        )
+        .await;
 
     announce_host_change(state, room, &format!("{name} is now hosting.")).await;
 }

@@ -127,6 +127,10 @@ pub struct RealtimeConfig {
     pub empty_room_grace: Duration,
     /// How often the sweep looks for rooms past that grace period.
     pub empty_room_sweep: Duration,
+    /// How long the room waits for a departed host to come back before handing
+    /// the room to someone else. A refresh closes and reopens the socket, so
+    /// without this every host who reloaded the page lost their room.
+    pub host_grace: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +230,7 @@ impl Config {
                 client_timeout: secs(parse_opt("WS_CLIENT_TIMEOUT_SECS")?.unwrap_or(30)),
                 handshake_timeout: secs(parse_opt("WS_HANDSHAKE_TIMEOUT_SECS")?.unwrap_or(5)),
                 send_buffer: parse_opt("WS_SEND_BUFFER")?.unwrap_or(256),
+                host_grace: secs(parse_opt("HOST_GRACE_SECS")?.unwrap_or(25)),
                 room_lease_ttl: secs(parse_opt("ROOM_LEASE_TTL_SECS")?.unwrap_or(30)),
                 room_lease_renew: secs(parse_opt("ROOM_LEASE_RENEW_SECS")?.unwrap_or(10)),
                 empty_room_grace: secs(parse_opt("EMPTY_ROOM_GRACE_SECS")?.unwrap_or(60)),
@@ -499,6 +504,7 @@ mod tests {
                 room_lease_renew: secs(10),
                 empty_room_grace: secs(60),
                 empty_room_sweep: secs(30),
+                host_grace: secs(25),
             },
             voice: VoiceConfig {
                 mesh_max_peers: 8,

@@ -152,8 +152,14 @@ const voiceCapacity = z.object({
 });
 
 const roomUpdated = z.object({ t: z.literal('room_updated'), room: roomSnapshot });
+/**
+ * Whose authority changed. Broadcast to the room, so a client must check
+ * `userId` against its own before applying it — see the reducer in the room
+ * store.
+ */
 const permissionsUpdated = z.object({
   t: z.literal('permissions_updated'),
+  userId: uuid,
   role: roomRole,
   permissions,
 });
