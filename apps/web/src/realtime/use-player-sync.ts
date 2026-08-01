@@ -1,5 +1,3 @@
-'use client';
-
 import { decideCorrection, positionAt, SYNC, type Timeline } from '@playercn/protocol';
 import { useEffect, useRef } from 'react';
 import type { PlayerEngine } from './player/engine';

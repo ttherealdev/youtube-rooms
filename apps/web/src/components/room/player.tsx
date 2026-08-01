@@ -1,5 +1,3 @@
-'use client';
-
 import { type MediaSource, mayBeLive, positionAt } from '@playercn/protocol';
 import {
   Loader2,

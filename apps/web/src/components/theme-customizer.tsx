@@ -1,5 +1,3 @@
-'use client';
-
 import { Check, Monitor, Moon, Palette, Sun } from 'lucide-react';
 import { useState } from 'react';
 import { useTheme } from '~/components/theme-provider';

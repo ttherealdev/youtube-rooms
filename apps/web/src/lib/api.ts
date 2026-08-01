@@ -11,7 +11,7 @@ import { apiError } from '@playercn/protocol';
  *    share a single in-flight refresh rather than starting a stampede.
  */
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? '';
+const BASE = import.meta.env.PUBLIC_API_URL ?? '';
 
 /**
  * Absolute URL for an API path.

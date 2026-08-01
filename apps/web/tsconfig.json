@@ -1,24 +1,21 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "lib": ["dom", "dom.iterable", "esnext"],
-    "types": ["node"],
-    "allowJs": true,
+    "types": ["node", "vite/client"],
     "noEmit": true,
-    // The protocol package is consumed straight from source (transpilePackages),
-    // and its internal imports carry explicit .ts extensions.
+    // The protocol package is consumed straight from source, and its internal
+    // imports carry explicit .ts extensions.
     "allowImportingTsExtensions": true,
-    "incremental": true,
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "paths": {
       "~/*": ["./src/*"]
-    },
-    "plugins": [{ "name": "next" }]
+    }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", "dist", ".tanstack"]
 }

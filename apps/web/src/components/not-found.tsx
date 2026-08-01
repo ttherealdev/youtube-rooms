@@ -1,7 +1,7 @@
-import Link from 'next/link';
+import { Link } from '@tanstack/react-router';
 import { Button } from '~/components/ui/button';
 
-export default function NotFound() {
+export function NotFound() {
   return (
     <main className="grid min-h-dvh place-items-center p-6">
       <div className="space-y-3 text-center">
@@ -12,10 +12,10 @@ export default function NotFound() {
           are removed shortly after the last person leaves.
         </p>
         <div className="flex justify-center gap-2 pt-2">
-          <Button render={<Link href="/rooms" />} variant="outline">
+          <Button render={<Link to="/rooms" />} variant="outline">
             Browse rooms
           </Button>
-          <Button render={<Link href="/rooms/new" />}>Create a room</Button>
+          <Button render={<Link to="/rooms/new" />}>Create a room</Button>
         </div>
       </div>
     </main>

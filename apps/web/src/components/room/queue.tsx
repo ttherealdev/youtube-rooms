@@ -1,5 +1,3 @@
-'use client';
-
 import { mayBeLive, type QueueItem } from '@playercn/protocol';
 import { ListPlus, Play, Plus, Radio, Shuffle, Trash2, X } from 'lucide-react';
 import { useState } from 'react';

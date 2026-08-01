@@ -1,13 +1,14 @@
 import type { UserSummary } from '@playercn/protocol';
-import { useCallback, useEffect, useState } from 'react';
-import { api, apiUrl, refreshAccessToken, scheduleRefresh, setAccessToken } from '~/lib/api';
+import { createContext, useContext } from 'react';
 
 /**
  * Who is signed in, if anyone.
  *
- * On mount this attempts a silent refresh: the refresh cookie is httpOnly, so
- * the only way to discover an existing session is to ask the server. That one
- * request is why the app briefly reports `loading` rather than `anonymous`.
+ * The state lives in a single provider (`SessionProvider`) rather than in each
+ * caller. When this was a self-contained hook, every component that called it
+ * ran its own silent refresh and kept its own copy of the user — so renaming
+ * yourself in the header left the join gate, the room and the participant list
+ * all showing the old name until a reload.
  */
 
 export type SessionState =
@@ -15,78 +16,20 @@ export type SessionState =
   | { status: 'anonymous' }
   | { status: 'authenticated'; user: UserSummary };
 
-interface SessionResponse {
-  accessToken: string;
-  expiresIn: number;
-  user: UserSummary;
+export interface SessionContextValue {
+  state: SessionState;
+  signInAsGuest: (displayName: string) => Promise<UserSummary>;
+  signInWithGoogle: (returnTo: string) => void;
+  signOut: () => Promise<void>;
+  rename: (displayName: string) => Promise<UserSummary>;
 }
 
-export function useSession() {
-  const [state, setState] = useState<SessionState>({ status: 'loading' });
+export const SessionContext = createContext<SessionContextValue | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    void (async () => {
-      const token = await refreshAccessToken();
-      if (cancelled) return;
-
-      if (!token) {
-        setState({ status: 'anonymous' });
-        return;
-      }
-
-      try {
-        const user = await api<UserSummary>('/api/auth/session');
-        if (!cancelled) setState({ status: 'authenticated', user });
-      } catch {
-        if (!cancelled) setState({ status: 'anonymous' });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const signInAsGuest = useCallback(async (displayName: string) => {
-    const session = await api<SessionResponse>('/api/auth/guest', {
-      method: 'POST',
-      body: { displayName },
-    });
-    setAccessToken(session.accessToken);
-    scheduleRefresh(session.expiresIn);
-    setState({ status: 'authenticated', user: session.user });
-    return session.user;
-  }, []);
-
-  const signInWithGoogle = useCallback((returnTo: string) => {
-    // A full navigation, not fetch: the OAuth flow needs the browser to follow
-    // redirects and set cookies on the way back. It must be an absolute API URL
-    // — the web and API run on separate hosts in production, and a relative one
-    // lands on the web server, which has no /api routes.
-    window.location.href = apiUrl(
-      `/api/auth/google/start?return_to=${encodeURIComponent(returnTo)}`,
-    );
-  }, []);
-
-  const signOut = useCallback(async () => {
-    try {
-      await api('/api/auth/logout', { method: 'POST' });
-    } finally {
-      setAccessToken(null);
-      setState({ status: 'anonymous' });
-    }
-  }, []);
-
-  const rename = useCallback(async (displayName: string) => {
-    const user = await api<UserSummary>('/api/auth/session', {
-      method: 'PATCH',
-      body: { displayName },
-    });
-    setState({ status: 'authenticated', user });
-    return user;
-  }, []);
-
-  return { state, signInAsGuest, signInWithGoogle, signOut, rename };
+export function useSession(): SessionContextValue {
+  const value = useContext(SessionContext);
+  if (!value) {
+    throw new Error('useSession must be used inside <SessionProvider>.');
+  }
+  return value;
 }

@@ -1,8 +1,5 @@
-'use client';
-
-import { useRouter } from 'next/navigation';
+import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
-import { JoinGate } from '~/components/join-gate';
 import { SiteHeader } from '~/components/site-header';
 import { Button } from '~/components/ui/button';
 import { Input } from '~/components/ui/input';
@@ -20,6 +17,10 @@ import { useSession } from '~/hooks/use-session';
 import { ApiError, api } from '~/lib/api';
 import { cn } from '~/lib/utils';
 
+export const Route = createFileRoute('/rooms/new')({
+  component: NewRoomPage,
+});
+
 const CATEGORIES = [
   'general',
   'anime',
@@ -36,9 +37,9 @@ const VISIBILITIES = [
   ['public', 'Public', 'Listed for anyone'],
 ] as const;
 
-export default function NewRoomPage() {
+function NewRoomPage() {
   const { state, signInWithGoogle } = useSession();
-  const router = useRouter();
+  const navigate = useNavigate();
 
   const [name, setName] = useState('');
   const [visibility, setVisibility] = useState<string>('private');
@@ -58,24 +59,16 @@ export default function NewRoomPage() {
     );
   }
 
-  if (state.status === 'anonymous') {
-    return <JoinGate onJoined={() => undefined} />;
-  }
-
-  // A guest can join anything but cannot own a room: an anonymous owner cannot
-  // be contacted or held responsible for a public one (ADR 0007).
-  if (state.user.kind === 'guest') {
+  // Creating a room needs a real account, so this screen asks for one directly.
+  // Offering "continue as guest" here — as the shared join gate does — walks
+  // people into a dead end: they name themselves, sign in, and are then told
+  // guests cannot own a room.
+  if (state.status === 'anonymous' || state.user.kind === 'guest') {
     return (
-      <main className="grid min-h-dvh place-items-center px-6">
-        <div className="max-w-sm space-y-4 text-center">
-          <h1 className="text-lg font-semibold tracking-tight">Sign in to create a room</h1>
-          <p className="text-sm text-muted-foreground">
-            You are signed in as a guest, which is enough to join any room. Creating one needs a
-            Google account so the room has an owner who can moderate it.
-          </p>
-          <Button onClick={() => signInWithGoogle('/rooms/new')}>Continue with Google</Button>
-        </div>
-      </main>
+      <SignInToCreate
+        onContinue={() => signInWithGoogle('/rooms/new')}
+        guest={state.status === 'authenticated'}
+      />
     );
   }
 
@@ -102,7 +95,7 @@ export default function NewRoomPage() {
           ...(password.trim() ? { password: password.trim() } : {}),
         },
       });
-      router.push(`/rooms/${room.slug}`);
+      void navigate({ to: '/rooms/$slug', params: { slug: room.slug } });
     } catch (cause) {
       setErrors(
         cause instanceof ApiError
@@ -253,6 +246,29 @@ export default function NewRoomPage() {
             Create room
           </Button>
         </form>
+      </main>
+    </div>
+  );
+}
+
+/**
+ * A guest can join anything but cannot own a room: an anonymous owner cannot be
+ * contacted or held responsible for a public one (ADR 0007).
+ */
+function SignInToCreate({ onContinue, guest }: { onContinue: () => void; guest: boolean }) {
+  return (
+    <div className="min-h-dvh">
+      <SiteHeader />
+      <main className="grid place-items-center px-6 py-24">
+        <div className="max-w-sm space-y-4 text-center">
+          <h1 className="text-lg font-semibold tracking-tight">Sign in to create a room</h1>
+          <p className="text-sm text-muted-foreground">
+            {guest
+              ? 'You are signed in as a guest, which is enough to join any room. Creating one needs a Google account so the room has an owner who can moderate it.'
+              : 'Joining a room only needs a name, but creating one needs a Google account so the room has an owner who can moderate it.'}
+          </p>
+          <Button onClick={onContinue}>Continue with Google</Button>
+        </div>
       </main>
     </div>
   );

@@ -1,8 +1,6 @@
-'use client';
-
 import { useQuery } from '@tanstack/react-query';
+import { createFileRoute, Link } from '@tanstack/react-router';
 import { Lock, Plus, Users } from 'lucide-react';
-import Link from 'next/link';
 import { useState } from 'react';
 import { SiteHeader } from '~/components/site-header';
 import { Badge } from '~/components/ui/badge';
@@ -12,6 +10,10 @@ import { Input } from '~/components/ui/input';
 import { Skeleton } from '~/components/ui/skeleton';
 import { api } from '~/lib/api';
 import { cn, debounce, formatRelative } from '~/lib/utils';
+
+export const Route = createFileRoute('/rooms/')({
+  component: RoomDirectory,
+});
 
 interface DirectoryItem {
   id: string;
@@ -35,7 +37,7 @@ const SORTS = [
 
 const CATEGORIES = ['anime', 'gaming', 'programming', 'music', 'movies', 'education'] as const;
 
-export default function RoomDirectory() {
+function RoomDirectory() {
   const [sort, setSort] = useState<string>('trending');
   const [category, setCategory] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -144,7 +146,7 @@ export default function RoomDirectory() {
                     : 'Be the first — make one and share the link.'}
                 </EmptyDescription>
               </EmptyHeader>
-              <Button render={<Link href="/rooms/new" />}>
+              <Button render={<Link to="/rooms/new" />}>
                 <Plus className="size-4" />
                 Create a room
               </Button>
@@ -169,7 +171,8 @@ function RoomCard({ room }: { room: DirectoryItem }) {
 
   return (
     <Link
-      href={`/rooms/${room.slug}`}
+      to="/rooms/$slug"
+      params={{ slug: room.slug }}
       className="group flex h-full flex-col overflow-hidden rounded-xl border transition-colors hover:border-foreground/25"
     >
       <div className="relative aspect-video overflow-hidden bg-muted">

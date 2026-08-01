@@ -15,11 +15,11 @@ RUN npm install --global pnpm@11.3.0
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
 
-# --- Build -------------------------------------------------------------------
-FROM base AS builder
+# --- Dependencies ------------------------------------------------------------
+# Manifests only, so a source-only change reuses this layer.
+FROM base AS deps
 WORKDIR /repo
 
-# Manifests first, so a source-only change reuses the install layer.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/
 COPY packages/protocol/package.json packages/protocol/
@@ -27,17 +27,32 @@ COPY packages/protocol/package.json packages/protocol/
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm install --frozen-lockfile
 
+# --- Runtime dependencies ----------------------------------------------------
+# Pruned production tree for the final image. Split out from the build because
+# it depends only on the manifests and the protocol source — editing a
+# component must not cost a fresh 25-second resolve of 290 packages.
+FROM deps AS runtime-deps
+WORKDIR /repo
+
+COPY packages/protocol packages/protocol
+
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm --filter @playercn/web deploy --prod --legacy /runtime
+
+# --- Build -------------------------------------------------------------------
+FROM deps AS builder
+WORKDIR /repo
+
 COPY . .
 
-# `NEXT_PUBLIC_*` values are inlined into the client bundle at build time, so
-# they have to be present here rather than only at runtime. Setting them in the
-# deploy environment alone leaves the browser talking to its own origin, which
-# serves no /api routes in production.
-ARG NEXT_PUBLIC_API_URL=""
-ARG NEXT_PUBLIC_WS_URL=""
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
-    NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL \
-    NEXT_TELEMETRY_DISABLED=1 \
+# `PUBLIC_*` values are inlined into the client bundle at build time (see
+# `envPrefix` in vite.config.ts), so they have to be present here rather than
+# only at runtime. Setting them in the deploy environment alone leaves the
+# browser talking to its own origin, which serves no /api routes in production.
+ARG PUBLIC_API_URL=""
+ARG PUBLIC_WS_URL=""
+ENV PUBLIC_API_URL=$PUBLIC_API_URL \
+    PUBLIC_WS_URL=$PUBLIC_WS_URL \
     NODE_ENV=production
 
 RUN pnpm --filter @playercn/web build
@@ -51,18 +66,13 @@ WORKDIR /app
 RUN apk add --no-cache tini
 
 ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
-    HOSTNAME=0.0.0.0
+    HOST=0.0.0.0
 
-# `output: 'standalone'` already produced a traced node_modules and its own
-# server.js, so there is no install step here. It deliberately does *not*
-# include static assets or public files — those are copied separately, and
-# missing either one yields a server that boots and then serves an unstyled
-# page with no JavaScript.
-COPY --from=builder --chown=node:node /repo/apps/web/.next/standalone ./
-COPY --from=builder --chown=node:node /repo/apps/web/.next/static ./apps/web/.next/static
-COPY --from=builder --chown=node:node /repo/apps/web/public ./apps/web/public
+COPY --from=runtime-deps --chown=node:node /runtime/package.json ./package.json
+COPY --from=runtime-deps --chown=node:node /runtime/node_modules ./node_modules
+COPY --from=builder --chown=node:node /repo/apps/web/dist ./dist
+COPY --from=builder --chown=node:node /repo/apps/web/server.js ./server.js
 
 USER node
 EXPOSE 3000
@@ -74,7 +84,5 @@ LABEL org.opencontainers.image.title="playercn-web" \
       org.opencontainers.image.description="playercn web client" \
       org.opencontainers.image.licenses="MIT"
 
-# For a workspace package the standalone server lands at the path it occupied
-# in the repo, not at the root of the output.
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "apps/web/server.js"]
+CMD ["node", "server.js"]

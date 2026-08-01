@@ -87,7 +87,7 @@ export class RoomSocket {
     // terminates both on one origin and the fallback is correct.
     const url = new URL(
       `/ws/rooms/${this.#roomId}`,
-      process.env.NEXT_PUBLIC_WS_URL ?? window.location.origin,
+      import.meta.env.PUBLIC_WS_URL ?? window.location.origin,
     );
     url.protocol = url.protocol.replace('http', 'ws');
 

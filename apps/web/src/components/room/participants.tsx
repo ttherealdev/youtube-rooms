@@ -1,5 +1,3 @@
-'use client';
-
 import type { Participant, RoomRole } from '@playercn/protocol';
 import { Crown, MoreVertical, Shield, Star, UserMinus, UserPlus } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '~/components/ui/avatar';

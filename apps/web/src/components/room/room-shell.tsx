@@ -1,10 +1,9 @@
-'use client';
-
 import { useQuery } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { Link2, MessageSquare, Settings, Users, Video } from 'lucide-react';
-import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
+import { JoinGate } from '~/components/join-gate';
 import { ChatPanel } from '~/components/room/chat';
 import { ParticipantsPanel } from '~/components/room/participants';
 import { Player } from '~/components/room/player';
@@ -15,6 +14,7 @@ import { Badge } from '~/components/ui/badge';
 import { Button } from '~/components/ui/button';
 import { Spinner } from '~/components/ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '~/components/ui/tabs';
+import { useSession } from '~/hooks/use-session';
 import { api } from '~/lib/api';
 import { asThemeKey, asThemeMode } from '~/lib/themes';
 import { RoomSocket } from '~/realtime/socket';
@@ -28,6 +28,7 @@ import { useConnection, usePermissions, useRoomStore } from '~/stores/room-store
  * from the store and sends intents back through the socket it is handed.
  */
 export function RoomShell({ slug }: { slug: string }) {
+  const { state: session } = useSession();
   const [socket, setSocket] = useState<RoomSocket | null>(null);
   const apply = useRoomStore((s) => s.apply);
   const setConnection = useRoomStore((s) => s.setConnection);
@@ -41,11 +42,15 @@ export function RoomShell({ slug }: { slug: string }) {
   // before a socket can be opened.
   const lookup = useQuery({
     queryKey: ['room', slug],
-    queryFn: () => api<{ id: string }>(`/api/rooms/by-slug/${slug}`),
+    queryFn: () => api<{ id: string; name: string }>(`/api/rooms/by-slug/${slug}`),
     retry: false,
   });
 
-  const roomId = lookup.data?.id;
+  // Connecting needs an identity: the socket authenticates with a ticket the
+  // API will only mint for a signed-in user. Without this guard an anonymous
+  // visitor opening a shared link watched the socket fail and retry forever
+  // instead of being asked for a name.
+  const roomId = session.status === 'authenticated' ? lookup.data?.id : undefined;
 
   useEffect(() => {
     if (!roomId) return;
@@ -81,11 +86,27 @@ export function RoomShell({ slug }: { slug: string }) {
           <p className="max-w-sm text-sm text-muted-foreground">
             This room may have closed. Rooms are removed shortly after everyone leaves.
           </p>
-          <Button render={<Link href="/rooms" />} variant="outline" size="sm">
+          <Button render={<Link to="/rooms" />} variant="outline" size="sm">
             Browse rooms
           </Button>
         </div>
       </Centered>
+    );
+  }
+
+  // Joining is deliberately the one place a guest name is asked for: it is the
+  // only flow where continuing without an account actually works.
+  if (session.status === 'loading') {
+    return <Centered>{<Spinner />}</Centered>;
+  }
+
+  if (session.status === 'anonymous') {
+    return (
+      <JoinGate
+        onJoined={() => undefined}
+        title={lookup.data ? `Join ${lookup.data.name}` : 'Choose a name'}
+        description="This is how everyone in the room will see you. You can change it later."
+      />
     );
   }
 
@@ -101,7 +122,7 @@ export function RoomShell({ slug }: { slug: string }) {
               ? 'Everyone left, so the room was closed.'
               : 'A host removed you from this room.'}
           </p>
-          <Button render={<Link href="/rooms" />} variant="outline" size="sm">
+          <Button render={<Link to="/rooms" />} variant="outline" size="sm">
             Browse rooms
           </Button>
         </div>

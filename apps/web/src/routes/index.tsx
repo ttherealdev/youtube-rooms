@@ -1,16 +1,19 @@
+import { createFileRoute, Link } from '@tanstack/react-router';
 import { ArrowRight, Compass, ListMusic, Play, Radio, Shield, Users, Zap } from 'lucide-react';
-import Link from 'next/link';
 import { SiteHeader } from '~/components/site-header';
 import { Button } from '~/components/ui/button';
+
+export const Route = createFileRoute('/')({
+  component: LandingPage,
+});
 
 /**
  * The landing page.
  *
- * A server component with no client JavaScript beyond the header — it is the
- * one surface where time-to-first-byte is the whole point, and none of it needs
- * to be interactive.
+ * Nothing here is interactive beyond the header, and it is the one surface
+ * where time-to-first-byte is the whole point.
  */
-export default function LandingPage() {
+function LandingPage() {
   return (
     <div className="min-h-dvh">
       <SiteHeader />
@@ -33,11 +36,11 @@ export default function LandingPage() {
             </p>
 
             <div className="mt-8 flex flex-wrap gap-3">
-              <Button render={<Link href="/rooms/new" />} size="lg">
+              <Button render={<Link to="/rooms/new" />} size="lg">
                 <Play className="size-4" />
                 Start a room
               </Button>
-              <Button render={<Link href="/rooms" />} size="lg" variant="outline">
+              <Button render={<Link to="/rooms" />} size="lg" variant="outline">
                 <Compass className="size-4" />
                 Browse rooms
               </Button>
@@ -64,7 +67,7 @@ export default function LandingPage() {
           <p className="mx-auto mt-3 max-w-md text-pretty text-muted-foreground">
             Create a room in about five seconds. Share it. That is the whole setup.
           </p>
-          <Button render={<Link href="/rooms/new" />} size="lg" className="mt-8">
+          <Button render={<Link to="/rooms/new" />} size="lg" className="mt-8">
             Create a room
             <ArrowRight className="size-4" />
           </Button>

@@ -1,5 +1,3 @@
-'use client';
-
 import type { ChatMessage } from '@playercn/protocol';
 import { Send } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
