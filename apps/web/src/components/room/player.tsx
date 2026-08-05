@@ -1,10 +1,13 @@
-import { Slider as SliderPrimitive } from '@base-ui/react/slider';
-import { type MediaSource, mayBeLive, positionAt } from '@playercn/protocol';
+import { Slider as SliderPrimitive } from "@base-ui/react/slider";
+import { type MediaSource, mayBeLive, positionAt } from "@playercn/protocol";
 import {
+  Check,
+  Copy,
   Frame,
+  Gauge,
   Maximize,
   Minimize,
-  MoreVertical,
+  MoreHorizontal,
   Pause,
   PictureInPicture2,
   Play,
@@ -19,10 +22,10 @@ import {
   Volume1,
   Volume2,
   VolumeX,
-} from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { toast } from 'sonner';
-import { Button } from '~/components/ui/button';
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -30,18 +33,25 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-} from '~/components/ui/dropdown-menu';
-import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip';
-import { cn, formatDuration } from '~/lib/utils';
-import type { PlayerEngine } from '~/realtime/player/engine';
-import { KickEngine } from '~/realtime/player/kick-engine';
-import { MediaEngine } from '~/realtime/player/media-engine';
-import { TwitchEngine } from '~/realtime/player/twitch-engine';
-import { YouTubeEngine } from '~/realtime/player/youtube-engine';
-import type { RoomSocket } from '~/realtime/socket';
-import { usePlayerSync } from '~/realtime/use-player-sync';
-import { usePermissions, useQueue, useTimeline } from '~/stores/room-store';
+} from "~/components/ui/dropdown-menu";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "~/components/ui/tooltip";
+import { cn, formatDuration } from "~/lib/utils";
+import type { PlayerEngine } from "~/realtime/player/engine";
+import { KickEngine } from "~/realtime/player/kick-engine";
+import { MediaEngine } from "~/realtime/player/media-engine";
+import { TwitchEngine } from "~/realtime/player/twitch-engine";
+import { YouTubeEngine } from "~/realtime/player/youtube-engine";
+import type { RoomSocket } from "~/realtime/socket";
+import { usePlayerSync } from "~/realtime/use-player-sync";
+import { usePermissions, useQueue, useTimeline } from "~/stores/room-store";
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 
@@ -49,9 +59,13 @@ const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 const SKIP = 10;
 
 /** Source kinds that draw into a third-party iframe rather than a `<video>`. */
-const EMBEDDED_KINDS = new Set<MediaSource['kind']>(['youtube', 'twitch', 'kick']);
+const EMBEDDED_KINDS = new Set<MediaSource["kind"]>([
+  "youtube",
+  "twitch",
+  "kick",
+]);
 
-/** How long the chrome stays up after the pointer stops moving. */
+/** How long the chrome stays up after the pointer stops moving (desktop). */
 const IDLE_MS = 2600;
 
 /**
@@ -66,6 +80,12 @@ const IDLE_MS = 2600;
  * follows. What makes that feel immediate rather than sluggish is that the sync
  * loop applies an incoming timeline the moment it arrives, instead of waiting
  * for its next interval tick.
+ *
+ * The chrome below the picture is two different layouts sharing one state
+ * machine, not one layout squeezed to fit. Desktop has room for every control
+ * inline with hover affordances; a phone does not, so touch gets four primary
+ * actions and a "More" sheet for everything else, with a volume popover
+ * instead of a hover-reveal slider nothing on touch can hover.
  */
 export function Player({
   socket,
@@ -94,6 +114,7 @@ export function Player({
   const [error, setError] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
+  const [volumeOpen, setVolumeOpen] = useState(false);
   const [position, setPosition] = useState(0);
   const [scrub, setScrub] = useState<number | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -117,25 +138,16 @@ export function Player({
   const embedded = source ? EMBEDDED_KINDS.has(source.kind) : false;
   // Kick's embed takes no volume parameter and no volume call, so it gets a
   // mute toggle instead of a slider rather than a slider that does nothing.
-  // Everything else, Kick included, can now be driven: its engine does
-  // transport by rebuilding the iframe, which is sound for a live edge because
-  // there is no position to lose.
-  const hasVolume = source?.kind !== 'kick';
+  const hasVolume = source?.kind !== "kick";
   const awaiting = timeline?.awaitingStart ?? false;
   const paused = timeline?.paused ?? true;
   const duration = timeline?.duration ?? null;
 
-  // The engine's callbacks are bound once, when the source is built, so they
-  // close over that render. A file that takes twenty seconds to buffer would
-  // answer with a version the room left behind long ago — and the server
-  // rejects a mismatched version — so readiness reads through a ref instead.
   const versionRef = useRef(0);
   versionRef.current = timeline?.version ?? 0;
   const canControlRef = useRef(canControl);
   canControlRef.current = canControl;
 
-  // The timeline carries the source, not its name; the queue row it came from
-  // is what has a human title.
   const nowPlaying = timeline?.queueItemId
     ? (queue.find((item) => item.id === timeline.queueItemId) ?? null)
     : null;
@@ -167,16 +179,9 @@ export function Player({
       },
       onReady: () => {
         setBuffering(false);
-        // Releases the room's hold on a freshly cued source. Sent by every
-        // viewer, not only whoever can control playback: the question being
-        // answered is "has this loaded anywhere", and the server keeps only
-        // the first answer.
-        socket?.send({ t: 'playback_ready', version: versionRef.current });
+        socket?.send({ t: "playback_ready", version: versionRef.current });
       },
       onLive: () => setEngineLive(true),
-      // The engine has muted itself to get playing at all, so the mute control
-      // has to agree — otherwise it shows an unmuted speaker over silence, and
-      // clicking it "unmutes" something already muted and does nothing.
       onAudioBlocked: () => {
         setAudioBlocked(true);
         setMuted(true);
@@ -186,24 +191,24 @@ export function Player({
         setQuality(engineRef.current?.quality?.() ?? null);
       },
       onDurationChange: (seconds: number) => {
-        // Only the room's authority learns durations for us; anyone able to
-        // control playback may report, and the server keeps the first.
-        if (canControlRef.current) socket?.send({ t: 'report_duration', seconds });
+        if (canControlRef.current)
+          socket?.send({ t: "report_duration", seconds });
       },
     };
 
-    // Three of these draw into the shared embed mount and one into the shared
-    // `<video>`; both nodes always exist, so nothing depends on a ref that has
-    // not been attached yet on the render that builds the engine.
     const mount = mountRef.current as HTMLElement;
     const next: PlayerEngine =
-      source.kind === 'youtube'
+      source.kind === "youtube"
         ? new YouTubeEngine(mount, source, events)
-        : source.kind === 'twitch'
+        : source.kind === "twitch"
           ? new TwitchEngine(mount, source, events)
-          : source.kind === 'kick'
+          : source.kind === "kick"
             ? new KickEngine(mount, source, events)
-            : new MediaEngine(videoRef.current as HTMLVideoElement, source, events);
+            : new MediaEngine(
+                videoRef.current as HTMLVideoElement,
+                source,
+                events,
+              );
 
     engineRef.current = next;
     setEngine(next);
@@ -211,9 +216,6 @@ export function Player({
     return () => {
       next.destroy();
       engineRef.current = null;
-      // Each embed tears down its own iframe, but they do not all agree on
-      // whether the wrapper goes with it. Clearing the shared mount guarantees
-      // a dead player is never left stacked behind the next one.
       mount.replaceChildren();
     };
   }, [sourceKey, socket]);
@@ -224,11 +226,10 @@ export function Player({
     onEngine?.(engine);
   }, [engine, onEngine]);
 
-  // Position readout, driven from the timeline rather than the player so the
-  // scrubber shows where the *room* is even while a client is rebuffering.
   useEffect(() => {
     if (!timeline || !socket) return;
-    const update = () => setPosition(positionAt(timeline, socket.clock.serverNow()));
+    const update = () =>
+      setPosition(positionAt(timeline, socket.clock.serverNow()));
     update();
     const id = setInterval(update, 250);
     return () => clearInterval(id);
@@ -236,30 +237,35 @@ export function Player({
 
   useEffect(() => {
     const onChange = () => setFullscreen(Boolean(document.fullscreenElement));
-    document.addEventListener('fullscreenchange', onChange);
-    return () => document.removeEventListener('fullscreenchange', onChange);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
   const send = useCallback(
     (action: SyncAction) => {
       if (!socket || !timeline) return;
-      socket.send({ t: 'sync_intent', action, version: timeline.version });
+      socket.send({ t: "sync_intent", action, version: timeline.version });
     },
     [socket, timeline],
   );
 
-  const { visible, wake } = useChrome(paused || awaiting || Boolean(error));
+  const { visible, wake, tap } = useChrome(
+    paused || awaiting || Boolean(error),
+  );
 
   const toggle = useCallback(() => {
     if (!canControl) return;
-    send({ kind: paused ? 'play' : 'pause' });
+    send({ kind: paused ? "play" : "pause" });
   }, [canControl, paused, send]);
 
   const seekBy = useCallback(
     (delta: number) => {
       if (!canControl) return;
       const ceiling = duration ?? position + Math.abs(delta);
-      send({ kind: 'seek', position: Math.max(0, Math.min(position + delta, ceiling)) });
+      send({
+        kind: "seek",
+        position: Math.max(0, Math.min(position + delta, ceiling)),
+      });
     },
     [canControl, position, duration, send],
   );
@@ -274,6 +280,13 @@ export function Player({
     },
     [engine],
   );
+
+  const toggleMute = useCallback(() => {
+    const next = !muted;
+    setMuted(next);
+    engine?.setMuted(next);
+    if (!next) setAudioBlocked(false);
+  }, [engine, muted]);
 
   /**
    * Take the browser up on its offer.
@@ -299,61 +312,86 @@ export function Player({
     [engine],
   );
 
+  const copyLink = useCallback(() => {
+    void navigator.clipboard.writeText(source?.url ?? "");
+    toast.success("Source URL copied");
+  }, [source]);
+
+  const toggleLoop = useCallback(
+    (next: boolean) => {
+      send({ kind: "set_loop", loop: next });
+      toast.success(
+        next
+          ? "Repeating this video — it will replay when it ends."
+          : "Repeat off — the room moves on to the next item.",
+      );
+    },
+    [send],
+  );
+
   if (!source) return <IdlePlayer />;
 
   const shown = scrub ?? position;
   const progress = duration && duration > 0 ? Math.min(1, shown / duration) : 0;
+  const canPip =
+    !embedded &&
+    typeof document !== "undefined" &&
+    document.pictureInPictureEnabled;
 
-  return (
+  const player = (
     <div
       ref={containerRef}
-      onPointerMove={() => wake()}
-      onPointerLeave={() => wake(false)}
+      onPointerMove={(event) => {
+        if (event.pointerType !== "touch") wake();
+      }}
+      onPointerLeave={(event) => {
+        if (event.pointerType !== "touch") wake(false);
+      }}
       className={cn(
-        'group/player relative isolate aspect-video overflow-hidden bg-black select-none',
-        // Normally the player is a card in a scrolling column. In theatre it is
-        // the column, and the picture is as large as the space allows.
-        //
-        // Sized by *width only*, with the aspect ratio deriving the height.
-        // Constraining both — `h-full` for the height and `max-w-full` for the
-        // width — is what broke the layout: the ratio and the width cap cannot
-        // both be honoured, so the box quietly overshot its column and pushed
-        // scrollbars onto the page. Capping the width at the widest 16:9 box
-        // that still fits the viewport height says the same thing in one
-        // constraint the browser can always satisfy. Theatre hides the header,
-        // so the picture column really is the full `100dvh`.
-        theatre ? 'w-full lg:w-[min(100%,calc(100dvh*16/9))]' : 'w-full rounded-xl',
-        !visible && 'cursor-none',
+        "group/player relative isolate aspect-video w-full overflow-hidden bg-black select-none",
+        // In theatre mode the sizing is owned by the centring wrapper below,
+        // so the box itself only needs to stay a 16:9 rectangle that never
+        // exceeds it. Outside theatre it is a rounded card in a column.
+        theatre ? "max-h-full max-w-full" : "rounded-xl",
+        !visible && "cursor-none",
       )}
     >
       {/* Both mounts always exist so switching source kinds does not depend on
           a ref that has not been attached yet on the render the engine builds. */}
       <div
         ref={mountRef}
-        className={cn('size-full', !embedded && 'hidden')}
+        className={cn("size-full", !embedded && "hidden")}
         aria-hidden={!embedded}
       />
-      {/* Captions travel inside the media — an HLS manifest carries its own
-          subtitle renditions, and an MP4 its own tracks — so there is no
-          separate <track> for us to author. */}
       {/* biome-ignore lint/a11y/useMediaCaption: captions ship inside the source */}
       <video
         ref={videoRef}
-        className={cn('size-full bg-black', embedded && 'hidden')}
+        className={cn("size-full bg-black", embedded && "hidden")}
         playsInline
         aria-hidden={embedded}
       />
 
-      {/* Click target over the picture. It sits *under* the control bar, and
-          for the embeds it doubles as the lid that stops the iframe eating
-          clicks — both to keep one person from driving their own player out of
-          sync, and to keep the embed's own chrome from ever surfacing. */}
+      {/* Click/tap target over the picture. On a mouse it toggles play; on
+          touch it only wakes the chrome, because a thumb's first tap on a
+          hidden control bar should never also cost a play/pause it couldn't
+          see coming. */}
       <button
         type="button"
-        onClick={toggle}
+        onClick={(event) => {
+          if (event.detail === 0) return; // ignore synthetic activation after a touch tap
+          toggle();
+        }}
+        onPointerUp={(event) => {
+          if (event.pointerType !== "touch") return;
+          if (!visible) {
+            tap();
+            return;
+          }
+          toggle();
+        }}
         onDoubleClick={() => toggleFullscreen(containerRef.current)}
         disabled={!canControl}
-        aria-label={paused ? 'Play' : 'Pause'}
+        aria-label={paused ? "Play" : "Pause"}
         className="absolute inset-0 z-10 cursor-default disabled:cursor-default"
       />
 
@@ -364,27 +402,27 @@ export function Player({
         paused={paused}
         canControl={canControl}
         poster={posterFor(source, nowPlaying?.thumbnailUrl)}
-        onSkip={() => send({ kind: 'next' })}
+        onSkip={() => send({ kind: "next" })}
       />
 
-      {/* Above the lid, because it exists to receive the one click the lid
-          would otherwise swallow. */}
-      {audioBlocked && !paused ? <UnmuteOverlay onUnmute={restoreAudio} /> : null}
+      {audioBlocked && !paused ? (
+        <UnmuteOverlay onUnmute={restoreAudio} />
+      ) : null}
 
       <div
         className={cn(
-          'absolute inset-x-0 bottom-0 z-20 flex flex-col gap-3 px-4 pt-16 pb-3 sm:px-6 sm:pb-4',
-          'bg-gradient-to-t from-black/85 via-black/45 to-transparent',
-          'transition-opacity duration-200',
-          visible ? 'opacity-100' : 'pointer-events-none opacity-0',
+          "absolute inset-x-0 bottom-0 z-20 flex flex-col gap-2 px-3 pt-14 pb-2.5 sm:gap-3 sm:px-6 sm:pt-16 sm:pb-4",
+          "bg-gradient-to-t from-black/90 via-black/50 to-transparent",
+          "transition-opacity duration-200",
+          visible ? "opacity-100" : "pointer-events-none opacity-0",
         )}
       >
-        <div className="flex items-end justify-between gap-4">
+        <div className="flex items-end justify-between gap-3">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-white sm:text-base">
+            <p className="truncate text-[13px] font-medium text-white sm:text-base">
               {nowPlaying?.title ?? titleFromSource(source)}
             </p>
-            <p className="truncate text-xs text-white/70">
+            <p className="truncate text-[11px] text-white/70 sm:text-xs">
               {describeState({ awaiting, buffering, live, source, nowPlaying })}
             </p>
           </div>
@@ -392,10 +430,15 @@ export function Player({
           {live ? (
             <span className="flex shrink-0 items-center gap-1.5">
               <span className="size-1.5 animate-pulse rounded-full bg-red-500" />
-              <span className="text-xs font-medium tracking-wide text-red-400 uppercase">Live</span>
+              <span className="text-[11px] font-medium tracking-wide text-red-400 uppercase sm:text-xs">
+                Live
+              </span>
             </span>
           ) : (
-            <span className="shrink-0 text-xs text-white/90" data-numeric>
+            <span
+              className="shrink-0 text-[11px] text-white/90 sm:text-xs"
+              data-numeric
+            >
               {formatDuration(shown)} / {formatDuration(duration)}
             </span>
           )}
@@ -412,15 +455,16 @@ export function Player({
             onScrub={setScrub}
             onCommit={(next) => {
               setScrub(null);
-              send({ kind: 'seek', position: next });
+              send({ kind: "seek", position: next });
             }}
           />
         )}
 
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-0.5 sm:gap-1">
+        {/* Desktop: every control inline. */}
+        <div className="hidden items-center justify-between gap-2 sm:flex">
+          <div className="flex items-center gap-0.5">
             <ControlButton
-              label={paused ? 'Play' : 'Pause'}
+              label={paused ? "Play" : "Pause"}
               disabled={!canControl}
               onClick={toggle}
             >
@@ -430,7 +474,6 @@ export function Player({
                 <Pause className="size-5 fill-current" />
               )}
             </ControlButton>
-
             <ControlButton
               label={`Back ${SKIP} seconds`}
               disabled={!canControl || live}
@@ -438,7 +481,6 @@ export function Player({
             >
               <RotateCcw className="size-5" />
             </ControlButton>
-
             <ControlButton
               label={`Forward ${SKIP} seconds`}
               disabled={!canControl || live}
@@ -446,126 +488,60 @@ export function Player({
             >
               <RotateCw className="size-5" />
             </ControlButton>
-
             <ControlButton
               label="Previous"
               disabled={!canControl}
-              onClick={() => send({ kind: 'previous' })}
+              onClick={() => send({ kind: "previous" })}
             >
               <SkipBack className="size-5" />
             </ControlButton>
-
             <ControlButton
               label="Next"
               disabled={!canControl}
-              onClick={() => send({ kind: 'next' })}
+              onClick={() => send({ kind: "next" })}
             >
               <SkipForward className="size-5" />
             </ControlButton>
           </div>
 
-          <div className="flex items-center gap-0.5 sm:gap-1">
+          <div className="flex items-center gap-0.5">
             <LoopButton
               looping={timeline?.loop ?? false}
               disabled={!canControl}
-              onToggle={(next) => {
-                send({ kind: 'set_loop', loop: next });
-                toast.success(
-                  next
-                    ? 'Repeating this video — it will replay when it ends.'
-                    : 'Repeat off — the room moves on to the next item.',
-                );
-              }}
+              onToggle={toggleLoop}
             />
 
             <VolumeControl
               muted={muted}
               volume={volume}
               slider={hasVolume}
-              onMute={() => {
-                const next = !muted;
-                setMuted(next);
-                engine?.setMuted(next);
-                if (!next) setAudioBlocked(false);
-              }}
+              open={volumeOpen}
+              onOpenChange={setVolumeOpen}
+              onMute={toggleMute}
               onVolume={applyVolume}
             />
 
-            {/* Only shown when the source actually offers a choice — a plain
-                file has one rendition, and a menu of one is noise. Quality is
-                a local decision, like volume: one person's connection must not
-                set everybody's bitrate. */}
             {qualities.length > 1 ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  render={
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-label="Quality"
-                      className="h-9 min-w-9 gap-1.5 px-2 text-xs font-medium text-white hover:bg-white/15 hover:text-white"
-                    >
-                      <Settings2 className="size-4" />
-                      {quality ? <span data-numeric>{quality}</span> : null}
-                    </Button>
-                  }
-                />
-                <DropdownMenuContent align="end">
-                  <DropdownMenuGroup>
-                    <DropdownMenuLabel>Quality</DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => applyQuality(null)}>
-                      Auto{quality === null ? ' ·' : ''}
-                    </DropdownMenuItem>
-                    {qualities.map((option) => (
-                      <DropdownMenuItem key={option} onClick={() => applyQuality(option)}>
-                        {option}
-                        {option === quality ? ' ·' : ''}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <QualityMenu
+                qualities={qualities}
+                quality={quality}
+                onSelect={applyQuality}
+              />
             ) : null}
 
             {live ? null : (
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  render={
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={!canControl}
-                      aria-label="Playback speed"
-                      className="h-9 min-w-9 px-2 text-xs font-medium text-white hover:bg-white/15 hover:text-white"
-                    >
-                      {timeline?.rate ?? 1}×
-                    </Button>
-                  }
-                />
-                <DropdownMenuContent align="end">
-                  {/* The label is a `GroupLabel`, which throws outside a
-                      `Group` — it is labelling something, and the primitive
-                      insists on being told what. */}
-                  <DropdownMenuGroup>
-                    <DropdownMenuLabel>Playback speed</DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    {RATES.map((rate) => (
-                      <DropdownMenuItem key={rate} onClick={() => send({ kind: 'set_rate', rate })}>
-                        {rate}×{rate === (timeline?.rate ?? 1) ? ' ·' : ''}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <RateMenu
+                rate={timeline?.rate ?? 1}
+                onSelect={(rate) => send({ kind: "set_rate", rate })}
+              />
             )}
 
             {onTheatre ? (
               <ControlButton
-                label={theatre ? 'Exit theatre mode' : 'Theatre mode'}
+                label={theatre ? "Exit theatre mode" : "Theatre mode"}
                 aria-pressed={theatre}
                 onClick={onTheatre}
-                className={cn(theatre && 'bg-white/20 hover:bg-white/25')}
+                className={cn(theatre && "bg-white/20 hover:bg-white/25")}
               >
                 {theatre ? (
                   <RectangleHorizontal className="size-5" />
@@ -575,16 +551,16 @@ export function Player({
               </ControlButton>
             ) : null}
 
-            {/* Only a real <video> can be popped out. The embeds render inside
-                a cross-origin iframe, which the API cannot reach into. */}
-            {!embedded && typeof document !== 'undefined' && document.pictureInPictureEnabled ? (
+            {canPip ? (
               <ControlButton
                 label="Picture in picture"
                 onClick={() => {
                   const video = videoRef.current;
                   if (!video) return;
-                  if (document.pictureInPictureElement) void document.exitPictureInPicture();
-                  else void video.requestPictureInPicture().catch(() => undefined);
+                  if (document.pictureInPictureElement)
+                    void document.exitPictureInPicture();
+                  else
+                    void video.requestPictureInPicture().catch(() => undefined);
                 }}
               >
                 <PictureInPicture2 className="size-5" />
@@ -592,65 +568,150 @@ export function Player({
             ) : null}
 
             <ControlButton
-              label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              label={fullscreen ? "Exit fullscreen" : "Fullscreen"}
               onClick={() => toggleFullscreen(containerRef.current)}
             >
-              {fullscreen ? <Minimize className="size-5" /> : <Maximize className="size-5" />}
+              {fullscreen ? (
+                <Minimize className="size-5" />
+              ) : (
+                <Maximize className="size-5" />
+              )}
             </ControlButton>
 
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="More"
-                    className="size-9 text-white hover:bg-white/15 hover:text-white"
-                  >
-                    <MoreVertical className="size-5" />
-                  </Button>
-                }
-              />
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onClick={() => {
-                    void navigator.clipboard.writeText(source.url);
-                    toast.success('Source URL copied');
-                  }}
-                >
-                  Copy source URL
-                </DropdownMenuItem>
-                <DropdownMenuItem disabled={!canControl} onClick={() => send({ kind: 'restart' })}>
-                  Restart from the beginning
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <MoreMenu
+              canControl={canControl}
+              onCopyLink={copyLink}
+              onRestart={() => send({ kind: "restart" })}
+            />
+          </div>
+        </div>
+
+        {/* Mobile: four primary actions plus one sheet for everything else.
+            Nothing here depends on hover, because nothing on a phone can. */}
+        <div className="flex items-center justify-between gap-1 sm:hidden">
+          <div className="flex items-center gap-0.5">
+            <ControlButton
+              label={paused ? "Play" : "Pause"}
+              disabled={!canControl}
+              onClick={toggle}
+              className="size-11"
+            >
+              {paused ? (
+                <Play className="size-6 fill-current" />
+              ) : (
+                <Pause className="size-6 fill-current" />
+              )}
+            </ControlButton>
+            <ControlButton
+              label={`Back ${SKIP} seconds`}
+              disabled={!canControl || live}
+              onClick={() => seekBy(-SKIP)}
+              className="size-10"
+            >
+              <RotateCcw className="size-5" />
+            </ControlButton>
+            <ControlButton
+              label={`Forward ${SKIP} seconds`}
+              disabled={!canControl || live}
+              onClick={() => seekBy(SKIP)}
+              className="size-10"
+            >
+              <RotateCw className="size-5" />
+            </ControlButton>
+          </div>
+
+          <div className="flex items-center gap-0.5">
+            <VolumeControl
+              muted={muted}
+              volume={volume}
+              slider={hasVolume}
+              open={volumeOpen}
+              onOpenChange={setVolumeOpen}
+              onMute={toggleMute}
+              onVolume={applyVolume}
+              compact
+            />
+            <ControlButton
+              label={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+              onClick={() => toggleFullscreen(containerRef.current)}
+              className="size-10"
+            >
+              {fullscreen ? (
+                <Minimize className="size-5" />
+              ) : (
+                <Maximize className="size-5" />
+              )}
+            </ControlButton>
+            <MobileMoreSheet
+              canControl={canControl}
+              live={live}
+              looping={timeline?.loop ?? false}
+              onToggleLoop={toggleLoop}
+              rate={timeline?.rate ?? 1}
+              onRate={(rate) => send({ kind: "set_rate", rate })}
+              qualities={qualities}
+              quality={quality}
+              onQuality={applyQuality}
+              theatre={theatre}
+              onTheatre={onTheatre}
+              canPip={canPip}
+              onPip={() => {
+                const video = videoRef.current;
+                if (!video) return;
+                if (document.pictureInPictureElement)
+                  void document.exitPictureInPicture();
+                else
+                  void video.requestPictureInPicture().catch(() => undefined);
+              }}
+              onPrevious={() => send({ kind: "previous" })}
+              onNext={() => send({ kind: "next" })}
+              onRestart={() => send({ kind: "restart" })}
+              onCopyLink={copyLink}
+            />
           </div>
         </div>
       </div>
     </div>
   );
+
+  if (!theatre) return player;
+
+  // Theatre owns its own centring instead of trusting whatever the room wraps
+  // it in. `dvh` rather than `vh` so mobile browser chrome collapsing does not
+  // leave a sliver of dead space at the bottom, and the flex centring means
+  // the 16:9 box is never pinned to a corner with leftover black margin — it
+  // sits in the middle of whatever room the viewport actually has.
+  return (
+    <div className="flex h-dvh w-full items-center justify-center bg-black">
+      {player}
+    </div>
+  );
 }
 
 type SyncAction =
-  | { kind: 'play' }
-  | { kind: 'pause' }
-  | { kind: 'seek'; position: number }
-  | { kind: 'set_rate'; rate: number }
-  | { kind: 'set_loop'; loop: boolean }
-  | { kind: 'play_now'; queueItemId: string }
-  | { kind: 'next' }
-  | { kind: 'previous' }
-  | { kind: 'restart' };
+  | { kind: "play" }
+  | { kind: "pause" }
+  | { kind: "seek"; position: number }
+  | { kind: "set_rate"; rate: number }
+  | { kind: "set_loop"; loop: boolean }
+  | { kind: "play_now"; queueItemId: string }
+  | { kind: "next" }
+  | { kind: "previous" }
+  | { kind: "restart" };
 
 /**
  * The auto-hiding chrome.
  *
- * Held open whenever the room is not actually playing. A paused player with
- * hidden controls is the most reliable way to make a video player feel broken,
- * because the only affordance for fixing it is invisible.
+ * Held open whenever the room is not actually playing. Desktop wakes on
+ * pointer movement and sleeps on a timer; touch has no hover, so a tap either
+ * wakes a sleeping bar (and stops there — the tap is spent) or, if the bar is
+ * already awake, falls through to the play/pause button underneath it.
  */
-function useChrome(pinned: boolean): { visible: boolean; wake: (active?: boolean) => void } {
+function useChrome(pinned: boolean): {
+  visible: boolean;
+  wake: (active?: boolean) => void;
+  tap: () => void;
+} {
   const [awake, setAwake] = useState(true);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -664,18 +725,21 @@ function useChrome(pinned: boolean): { visible: boolean; wake: (active?: boolean
     timer.current = setTimeout(() => setAwake(false), IDLE_MS);
   }, []);
 
+  const tap = useCallback(() => wake(true), [wake]);
+
   useEffect(() => {
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
   }, []);
 
-  return { visible: pinned || awake, wake };
+  return { visible: pinned || awake, wake, tap };
 }
 
 /**
- * The seek bar from the reference design: a thin rule that thickens under the
- * pointer, with the handle appearing only once you are aiming at it.
+ * The seek bar: a thin rule that thickens under the pointer, with a larger
+ * invisible hit area than its visible track so a thumb can land on it without
+ * needing surgeon's aim.
  */
 function SeekBar({
   value,
@@ -708,29 +772,19 @@ function SeekBar({
       }}
       className="group/seek w-full"
     >
-      <SliderPrimitive.Control className="relative flex h-3 w-full touch-none items-center select-none data-disabled:opacity-60">
-        <SliderPrimitive.Track className="relative h-[3px] w-full grow overflow-hidden rounded-full bg-white/40 transition-[height] group-hover/seek:h-[5px]">
-          {/* Driven by the derived progress rather than the primitive's own
-              indicator, so the fill cannot disagree with the readout above it. */}
+      <SliderPrimitive.Control className="relative flex h-5 w-full touch-none items-center select-none data-disabled:opacity-60 sm:h-3">
+        <SliderPrimitive.Track className="relative h-[4px] w-full grow overflow-hidden rounded-full bg-white/40 transition-[height] sm:h-[3px] sm:group-hover/seek:h-[5px]">
           <div
             className="h-full rounded-full bg-white"
             style={{ width: `${Math.round(progress * 1000) / 10}%` }}
           />
         </SliderPrimitive.Track>
-        <SliderPrimitive.Thumb className="relative block size-3 shrink-0 rounded-full bg-white opacity-0 shadow transition-opacity after:absolute after:-inset-2 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-white/70 group-hover/seek:opacity-100" />
+        <SliderPrimitive.Thumb className="relative block size-3.5 shrink-0 rounded-full bg-white opacity-100 shadow transition-opacity after:absolute after:-inset-3 focus-visible:outline-2 focus-visible:outline-white/70 sm:size-3 sm:opacity-0 sm:group-hover/seek:opacity-100" />
       </SliderPrimitive.Control>
     </SliderPrimitive.Root>
   );
 }
 
-/**
- * Loop, with the ambiguity removed.
- *
- * The old control was a bare repeat glyph toggling something invisible: no
- * label, no state, and no way to tell whether it looped the video, the queue,
- * or nothing at all. It loops the *current video* — the server restarts it in
- * place when it ends — so the icon, the tooltip and the toast all say so.
- */
 function LoopButton({
   looping,
   disabled,
@@ -749,19 +803,25 @@ function LoopButton({
             size="icon-sm"
             disabled={disabled}
             aria-pressed={looping}
-            aria-label={looping ? 'Stop repeating this video' : 'Repeat this video'}
+            aria-label={
+              looping ? "Stop repeating this video" : "Repeat this video"
+            }
             onClick={() => onToggle(!looping)}
             className={cn(
-              'size-9 text-white hover:bg-white/15 hover:text-white',
-              looping && 'bg-white/20 text-white hover:bg-white/25',
+              "size-9 text-white hover:bg-white/15 hover:text-white",
+              looping && "bg-white/20 text-white hover:bg-white/25",
             )}
           >
-            {looping ? <Repeat1 className="size-5" /> : <Repeat className="size-5" />}
+            {looping ? (
+              <Repeat1 className="size-5" />
+            ) : (
+              <Repeat className="size-5" />
+            )}
           </Button>
         }
       />
       <TooltipContent>
-        {looping ? 'Repeating this video' : 'Repeat this video when it ends'}
+        {looping ? "Repeating this video" : "Repeat this video when it ends"}
       </TooltipContent>
     </Tooltip>
   );
@@ -770,37 +830,98 @@ function LoopButton({
 /**
  * Volume is purely local — it is the one control that must never be shared, or
  * one person's headphones set the level for everybody in the room.
+ *
+ * Desktop expands the slider on hover, the way it always has. Touch has no
+ * hover, so tapping the icon toggles the same expanded state explicitly —
+ * both paths land on one `open` flag rather than forking into two controls.
  */
 function VolumeControl({
   muted,
   volume,
   slider,
+  open,
+  onOpenChange,
   onMute,
   onVolume,
+  compact = false,
 }: {
   muted: boolean;
   volume: number;
   /** False for a source that can only be muted or not — Kick has no level. */
   slider: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onMute: () => void;
   onVolume: (value: number) => void;
+  /** Mobile: the button opens a small floating popover instead of expanding inline. */
+  compact?: boolean;
 }) {
-  const Icon = muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
+  const Icon =
+    muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
 
   if (!slider) {
     return (
-      <ControlButton label={muted ? 'Unmute' : 'Mute'} onClick={onMute}>
-        <Icon className="size-5" />
+      <ControlButton
+        label={muted ? "Unmute" : "Mute"}
+        onClick={onMute}
+        className={compact ? "size-10" : undefined}
+      >
+        <Icon className={compact ? "size-5" : "size-5"} />
       </ControlButton>
     );
   }
 
+  if (compact) {
+    return (
+      <div className="relative">
+        <ControlButton
+          label={muted ? "Unmute" : "Mute"}
+          onClick={() => onOpenChange(!open)}
+          className="size-10"
+        >
+          <Icon className="size-5" />
+        </ControlButton>
+        {open ? (
+          <div className="-translate-x-1/2 absolute bottom-full left-1/2 mb-2 flex h-24 items-center rounded-lg bg-black/90 px-2 py-3 backdrop-blur-sm">
+            <SliderPrimitive.Root
+              value={[muted ? 0 : volume]}
+              min={0}
+              max={1}
+              step={0.05}
+              orientation="vertical"
+              thumbAlignment="edge"
+              aria-label="Volume"
+              onValueChange={(next) => {
+                const value = firstThumb(next);
+                if (value != null) onVolume(value);
+              }}
+              className="h-full"
+            >
+              <SliderPrimitive.Control className="relative flex h-full w-8 touch-none flex-col items-center justify-end select-none">
+                <SliderPrimitive.Track className="relative w-[4px] grow overflow-hidden rounded-full bg-white/40">
+                  <SliderPrimitive.Indicator className="w-full rounded-full bg-white" />
+                </SliderPrimitive.Track>
+                <SliderPrimitive.Thumb className="relative block size-3.5 shrink-0 rounded-full bg-white after:absolute after:-inset-3" />
+              </SliderPrimitive.Control>
+            </SliderPrimitive.Root>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <div className="group/volume flex items-center">
-      <ControlButton label={muted ? 'Unmute' : 'Mute'} onClick={onMute}>
+    <div
+      className="group/volume flex items-center"
+      onMouseEnter={() => onOpenChange(true)}
+      onMouseLeave={() => onOpenChange(false)}
+    >
+      <ControlButton label={muted ? "Unmute" : "Mute"} onClick={onMute}>
         <Icon className="size-5" />
       </ControlButton>
-      <div className="w-0 overflow-hidden transition-[width] group-focus-within/volume:w-20 group-hover/volume:w-20">
+      <div
+        className={cn("w-0 overflow-hidden transition-[width]", open && "w-20")}
+      >
         <SliderPrimitive.Root
           value={[muted ? 0 : volume]}
           min={0}
@@ -826,10 +947,287 @@ function VolumeControl({
   );
 }
 
+function QualityMenu({
+  qualities,
+  quality,
+  onSelect,
+}: {
+  qualities: string[];
+  quality: string | null;
+  onSelect: (next: string | null) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label="Quality"
+            className="h-9 min-w-9 gap-1.5 px-2 text-xs font-medium text-white hover:bg-white/15 hover:text-white"
+          >
+            <Settings2 className="size-4" />
+            {quality ? <span data-numeric>{quality}</span> : null}
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Quality</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => onSelect(null)}>
+            Auto{quality === null ? " ·" : ""}
+          </DropdownMenuItem>
+          {qualities.map((option) => (
+            <DropdownMenuItem key={option} onClick={() => onSelect(option)}>
+              {option}
+              {option === quality ? " ·" : ""}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function RateMenu({
+  rate,
+  onSelect,
+}: {
+  rate: number;
+  onSelect: (rate: number) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label="Playback speed"
+            className="h-9 min-w-9 px-2 text-xs font-medium text-white hover:bg-white/15 hover:text-white"
+          >
+            {rate}×
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Playback speed</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {RATES.map((option) => (
+            <DropdownMenuItem key={option} onClick={() => onSelect(option)}>
+              {option}×{option === rate ? " ·" : ""}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function MoreMenu({
+  canControl,
+  onCopyLink,
+  onRestart,
+}: {
+  canControl: boolean;
+  onCopyLink: () => void;
+  onRestart: () => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="More"
+            className="size-9 text-white hover:bg-white/15 hover:text-white"
+          >
+            <MoreHorizontal className="size-5" />
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onClick={onCopyLink}>
+          <Copy className="size-4" />
+          Copy source URL
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled={!canControl} onClick={onRestart}>
+          <RotateCcw className="size-4" />
+          Restart from the beginning
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /**
- * Everything that can be true of the picture instead of a picture: waiting for
- * the room to start, rebuffering, failed, or simply paused.
+ * Everything that doesn't fit — or doesn't make sense — on a phone's primary
+ * row. One menu instead of six icons: loop, speed, quality, theatre, PiP,
+ * previous/next, restart, copy link. Grouped so the two most likely actions
+ * (previous/next) sit at the top rather than buried under settings.
  */
+function MobileMoreSheet({
+  canControl,
+  live,
+  looping,
+  onToggleLoop,
+  rate,
+  onRate,
+  qualities,
+  quality,
+  onQuality,
+  theatre,
+  onTheatre,
+  canPip,
+  onPip,
+  onPrevious,
+  onNext,
+  onRestart,
+  onCopyLink,
+}: {
+  canControl: boolean;
+  live: boolean;
+  looping: boolean;
+  onToggleLoop: (next: boolean) => void;
+  rate: number;
+  onRate: (rate: number) => void;
+  qualities: string[];
+  quality: string | null;
+  onQuality: (next: string | null) => void;
+  theatre: boolean;
+  onTheatre?: () => void;
+  canPip: boolean;
+  onPip: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
+  onRestart: () => void;
+  onCopyLink: () => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="More controls"
+            className="size-10 text-white hover:bg-white/15 hover:text-white"
+          >
+            <MoreHorizontal className="size-5" />
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuGroup>
+          <DropdownMenuItem disabled={!canControl} onClick={onPrevious}>
+            <SkipBack className="size-4" />
+            Previous
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={!canControl} onClick={onNext}>
+            <SkipForward className="size-4" />
+            Next
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuGroup>
+          <DropdownMenuItem
+            disabled={!canControl}
+            onClick={() => onToggleLoop(!looping)}
+          >
+            {looping ? (
+              <Repeat1 className="size-4" />
+            ) : (
+              <Repeat className="size-4" />
+            )}
+            {looping ? "Repeating — tap to stop" : "Repeat this video"}
+          </DropdownMenuItem>
+          {!live ? (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Gauge className="size-4" />
+                Speed · {rate}×
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                {RATES.map((option) => (
+                  <DropdownMenuItem key={option} onClick={() => onRate(option)}>
+                    {option === rate ? (
+                      <Check className="size-4" />
+                    ) : (
+                      <span className="size-4" />
+                    )}
+                    {option}×
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          ) : null}
+          {qualities.length > 1 ? (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Settings2 className="size-4" />
+                Quality · {quality ?? "Auto"}
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuItem onClick={() => onQuality(null)}>
+                  {quality === null ? (
+                    <Check className="size-4" />
+                  ) : (
+                    <span className="size-4" />
+                  )}
+                  Auto
+                </DropdownMenuItem>
+                {qualities.map((option) => (
+                  <DropdownMenuItem
+                    key={option}
+                    onClick={() => onQuality(option)}
+                  >
+                    {option === quality ? (
+                      <Check className="size-4" />
+                    ) : (
+                      <span className="size-4" />
+                    )}
+                    {option}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          ) : null}
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuGroup>
+          {onTheatre ? (
+            <DropdownMenuItem onClick={onTheatre}>
+              {theatre ? (
+                <RectangleHorizontal className="size-4" />
+              ) : (
+                <Frame className="size-4" />
+              )}
+              {theatre ? "Exit theatre mode" : "Theatre mode"}
+            </DropdownMenuItem>
+          ) : null}
+          {canPip ? (
+            <DropdownMenuItem onClick={onPip}>
+              <PictureInPicture2 className="size-4" />
+              Picture in picture
+            </DropdownMenuItem>
+          ) : null}
+          <DropdownMenuItem onClick={onCopyLink}>
+            <Copy className="size-4" />
+            Copy source URL
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={!canControl} onClick={onRestart}>
+            <RotateCcw className="size-4" />
+            Restart from the beginning
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function StatusOverlay({
   awaiting,
   buffering,
@@ -850,16 +1248,19 @@ function StatusOverlay({
   if (error) {
     return (
       <div className="absolute inset-0 z-30 grid place-items-center p-6 text-center">
-        {/* The artwork earns its keep hardest here. A viewer whose network
-            blocks the source — Kick is unreachable from several countries —
-            gets the still the *server* fetched, which is the only part of the
-            stream that will ever reach them. */}
         <Artwork poster={poster} dim="bg-black/85" />
         <div className="relative max-w-sm space-y-2">
-          <p className="text-sm font-medium text-white">Can’t play this source</p>
+          <p className="text-sm font-medium text-white">
+            Can't play this source
+          </p>
           <p className="text-xs text-white/70">{error}</p>
           {canControl ? (
-            <Button size="sm" variant="secondary" onClick={onSkip} className="mt-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={onSkip}
+              className="mt-2"
+            >
               Skip to next
             </Button>
           ) : null}
@@ -868,10 +1269,6 @@ function StatusOverlay({
     );
   }
 
-  // Loading now shows the artwork of the thing being loaded, with a thread of
-  // motion along the top edge. The old treatment put the busiest element on
-  // screen — a large spinning circle — exactly where the picture was about to
-  // appear, so every half-second rebuffer read as a fault.
   if (awaiting || buffering) {
     return (
       <div className="pointer-events-none absolute inset-0 z-20">
@@ -893,23 +1290,13 @@ function StatusOverlay({
   return (
     <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center">
       <Artwork poster={poster} dim="bg-black/45" />
-      <span className="relative grid size-16 place-items-center rounded-full bg-black/55 backdrop-blur-sm">
-        <Play className="size-7 fill-white text-white" />
+      <span className="relative grid size-14 place-items-center rounded-full bg-black/55 backdrop-blur-sm sm:size-16">
+        <Play className="size-6 fill-white text-white sm:size-7" />
       </span>
     </div>
   );
 }
 
-/**
- * The way back to having sound.
- *
- * Every viewer except whoever pressed play gets their playback started by the
- * sync loop rather than by a click, and browsers refuse to start audible
- * playback nobody asked for. The engines recover by muting, which means the
- * room is playing correctly and silently — a state that is invisible unless it
- * is said out loud. This is deliberately a real button sitting above the
- * click-lid, because the click it receives is what makes unmuting legal.
- */
 function UnmuteOverlay({ onUnmute }: { onUnmute: () => void }) {
   return (
     <div className="absolute inset-x-0 top-0 z-30 flex justify-center p-3 sm:p-4">
@@ -925,22 +1312,11 @@ function UnmuteOverlay({ onUnmute }: { onUnmute: () => void }) {
   );
 }
 
-/**
- * The backdrop behind every non-playing state.
- *
- * It earns its place twice over. It gives buffering and paused something to
- * look at other than a black rectangle — and for YouTube it is also a cover: a
- * paused embed draws a grid of related videos over the picture, and no player
- * parameter turns it off, `rel=0` having meant "from this channel" rather than
- * "none" since 2018.
- */
 function Artwork({ poster, dim }: { poster: string | null; dim: string }) {
-  if (!poster) return <span className={cn('absolute inset-0', dim)} />;
+  if (!poster) return <span className={cn("absolute inset-0", dim)} />;
 
   return (
     <>
-      {/* Blurred and pushed past the edges underneath, so artwork that is not
-          exactly 16:9 fills the frame instead of showing pillarboxes. */}
       <span
         className="absolute inset-0 scale-110 bg-cover bg-center blur-xl"
         style={{ backgroundImage: `url(${poster})` }}
@@ -949,26 +1325,17 @@ function Artwork({ poster, dim }: { poster: string | null; dim: string }) {
         className="absolute inset-0 bg-contain bg-center bg-no-repeat"
         style={{ backgroundImage: `url(${poster})` }}
       />
-      <span className={cn('absolute inset-0', dim)} />
+      <span className={cn("absolute inset-0", dim)} />
     </>
   );
 }
 
-/**
- * The best still available for a source.
- *
- * The queue row is preferred, because it carries whatever artwork the source's
- * own metadata offered. YouTube can always synthesise one from the video id,
- * which matters because it is the source whose paused state most needs
- * covering.
- *
- * `hqdefault` rather than `maxresdefault`: the latter is missing for a lot of
- * older and lower-resolution uploads, and a 404 here would show a broken
- * backdrop instead of covering the thing it exists to cover.
- */
-function posterFor(source: MediaSource, queueThumbnail: string | undefined): string | null {
+function posterFor(
+  source: MediaSource,
+  queueThumbnail: string | undefined,
+): string | null {
   if (queueThumbnail) return queueThumbnail;
-  if (source.kind === 'youtube' && source.videoId) {
+  if (source.kind === "youtube" && source.videoId) {
     return `https://i.ytimg.com/vi/${source.videoId}/hqdefault.jpg`;
   }
   return null;
@@ -989,7 +1356,7 @@ function ControlButton({
             size="icon-sm"
             aria-label={label}
             className={cn(
-              'size-9 text-white hover:bg-white/15 hover:text-white disabled:opacity-40',
+              "size-9 text-white hover:bg-white/15 hover:text-white disabled:opacity-40",
               className,
             )}
             {...props}
@@ -1022,31 +1389,22 @@ function toggleFullscreen(node: HTMLElement | null): void {
   else void node.requestFullscreen().catch(() => undefined);
 }
 
-/**
- * Normalise a slider value.
- *
- * The primitive supports multi-thumb ranges and so reports either a number or
- * an array of them. Every slider in this player is single-thumb.
- */
 function firstThumb(value: number | readonly number[]): number | undefined {
-  return typeof value === 'number' ? value : value[0];
+  return typeof value === "number" ? value : value[0];
 }
 
-/** A usable name for a source the queue could not name for us. */
 function titleFromSource(source: MediaSource): string {
-  if (source.kind === 'youtube') return 'YouTube video';
-  if (source.kind === 'twitch' || source.kind === 'kick') {
-    // The canonical URL is `<platform>/<channel>` or `/videos/<id>`, so the
-    // last segment is the most useful name available before metadata arrives.
-    const name = source.url.split('/').filter(Boolean).pop();
-    return name ?? (source.kind === 'twitch' ? 'Twitch' : 'Kick');
+  if (source.kind === "youtube") return "YouTube video";
+  if (source.kind === "twitch" || source.kind === "kick") {
+    const name = source.url.split("/").filter(Boolean).pop();
+    return name ?? (source.kind === "twitch" ? "Twitch" : "Kick");
   }
   try {
     const { pathname, hostname } = new URL(source.url);
-    const file = pathname.split('/').filter(Boolean).pop();
+    const file = pathname.split("/").filter(Boolean).pop();
     return file ? decodeURIComponent(file) : hostname;
   } catch {
-    return 'Now playing';
+    return "Now playing";
   }
 }
 
@@ -1063,12 +1421,12 @@ function describeState({
   source: MediaSource;
   nowPlaying: { channelTitle: string } | null;
 }): string {
-  if (awaiting) return 'Waiting for everyone to load…';
-  if (buffering) return 'Buffering…';
+  if (awaiting) return "Waiting for everyone to load…";
+  if (buffering) return "Buffering…";
   if (nowPlaying?.channelTitle) return nowPlaying.channelTitle;
-  if (source.kind === 'kick') return 'Kick';
-  if (source.kind === 'twitch') return 'Twitch';
-  if (live) return 'Live stream';
+  if (source.kind === "kick") return "Kick";
+  if (source.kind === "twitch") return "Twitch";
+  if (live) return "Live stream";
   try {
     return new URL(source.url).hostname;
   } catch {
